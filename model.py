@@ -1,117 +1,174 @@
-import torch
+from collections import OrderedDict
 import torch.nn as nn
-import torch.nn.functional as F
+import torchvision
+import torch
 
-def topk_mask(input, dim, K = 10, **kwargs):
-	index = input.topk(max(1, min(K, input.size(dim))), dim = dim, **kwargs)[1]
-	return torch.autograd.Variable(torch.zeros_like(input.data)).scatter(dim, index, 1.0)
+torchvision.models.inception_v3()
 
-def pdist(A, squared = False, eps = 1e-4):
-	prod = torch.mm(A, A.t())
-	norm = prod.diag().unsqueeze(1).expand_as(prod)
-	res = (norm + norm.t() - 2 * prod).clamp(min = 0)
-	return res if squared else res.clamp(min = eps).sqrt()
-	
-class Model(nn.Module):
-	def __init__(self, base_model, num_classes, embedding_size = 128):
-		super(Model, self).__init__()
-		self.base_model = base_model
-		self.num_classes = num_classes
-		self.embedder = nn.Linear(base_model.output_size, embedding_size)
+class vgg16bn(nn.Module):
+    rgb_mean = [0.485, 0.456, 0.406]
+    rgb_std = [0.229, 0.224, 0.225]
+    input_side = 224
+    output_size = 512
+    rescale = 1
 
-	def forward(self, input):
-		return self.embedder(F.relu(self.base_model(input).view(len(input), -1)))
-	
-	criterion = None
-	optimizer = torch.optim.SGD
-	optimizer_params = dict(lr = 1e-4, momentum = 0.9, weight_decay = 2e-4)
-	lr_scheduler_params = dict(step_size = float('inf'), gamma = 0.1)
+    def __init__(self):
+        super(vgg16bn, self).__init__()
+        m = torchvision.models.vgg16_bn(pretrained=True)
+        self.feat = m.features
+        self.embedding = m.classifier[:4]
 
-class Untrained(Model):
-	def forward(self, input):
-		return self.base_model(input).view(input.size(0), -1).detach()
+    def forward(self, x):
+        x = self.feat(x)
+        x = x.view(x.size(0), -1)
+        x = self.embedding(x)
+        return x
 
-class LiftedStruct(Model):
-	def criterion(self, embeddings, labels, margin = 1.0, eps = 1e-4):
-		d = pdist(embeddings, squared = False, eps = eps)
-		pos = torch.eq(*[labels.unsqueeze(dim).expand_as(d) for dim in [0, 1]]).type_as(d)
-		neg_i = torch.mul((margin - d).exp(), 1 - pos).sum(1).expand_as(d)
-		return torch.sum(F.relu(pos.triu(1) * ((neg_i + neg_i.t()).log() + d)).pow(2)) / (pos.sum() - len(d))
 
-class Triplet(Model):
-	def criterion(self, embeddings, labels, margin = 1.0):
-		d = pdist(embeddings)
-		pos = torch.eq(*[labels.unsqueeze(dim).expand_as(d) for dim in [0, 1]]).type_as(d) - torch.autograd.Variable(torch.eye(len(d))).type_as(d)
-		T = d.unsqueeze(1).expand(*(len(d),) * 3)
-		M = pos.unsqueeze(1).expand_as(T) * (1 - pos.unsqueeze(2).expand_as(T))
-		return (M * F.relu(T - T.transpose(1, 2) + margin)).sum() / M.sum()
-	
-	optimizer_params = dict(lr = 1e-4, momentum = 0.9, weight_decay = 5e-4)
-	lr_scheduler_params = dict(step_size = 30, gamma = 0.5)
+class vgg19bn(nn.Sequential):
+    rgb_mean = [0.485, 0.456, 0.406]
+    rgb_std = [0.229, 0.224, 0.225]
+    input_side = 224
+    output_size = 512
+    rescale = 1
 
-class TripletRatio(Model):
-	def criterion(self, embeddings, labels, margin = 0.1, eps = 1e-4):
-		d = pdist(embeddings, squared = False, eps = eps)
-		pos = torch.eq(*[labels.unsqueeze(dim).expand_as(d) for dim in [0, 1]]).type_as(d)
-		T = d.unsqueeze(1).expand(*(len(d),) * 3)
-		M = pos.unsqueeze(1).expand_as(T) * (1 - pos.unsqueeze(2).expand_as(T))
-		return (M * T.div(T.transpose(1, 2) + margin)).sum() / M.sum()
+    def __init__(self):
+        super(vgg19bn, self).__init__()
+        self.add_module('vgg19bn', torchvision.models.vgg19_bn(pretrained=True).features)
+        self.add_module('avgpool', nn.AdaptiveMaxPool2d((1, 1)))
 
-class Pddm(Model):
-	def __init__(self, base_model, num_classes, d = 1024):
-		nn.Module.__init__(self)
-		self.base_model = base_model
-		#self.embedder = nn.Linear(base_model.output_size, d)
-		self.embedder = lambda x: x #nn.Linear(base_model.output_size, d)
-		self.wu = nn.Linear(d, d)
-		self.wv = nn.Linear(d, d)
-		self.wc = nn.Linear(2 * d, d)
-		self.ws = nn.Linear(d, 1)
-	
-	def forward(self, input):
-		return F.normalize(Model.forward(self, input))
 
-	def criterion(self, embeddings, labels, Alpha = 0.5, Beta = 1.0, Lambda = 0.5):
-		#embeddings = embeddings * topk_mask(embeddings, dim = 1, K = 512)
-		d = pdist(embeddings, squared = True)
-		pos = torch.eq(*[labels.unsqueeze(dim).expand_as(d) for dim in [0, 1]]).type_as(embeddings) - torch.autograd.Variable(torch.eye(len(d))).type_as(embeddings)
+class resnet18(nn.Sequential):
+    output_size = 512
+    input_side = 224
+    rescale = 1
+    rgb_mean = [0.485, 0.456, 0.406]
+    rgb_std = [0.229, 0.224, 0.225]
 
-		f1, f2 = [embeddings.unsqueeze(dim).expand(len(embeddings), *embeddings.size()) for dim in [0, 1]]
-		u = (f1 - f2).abs()
-		v = (f1 + f2) / 2
-		u_ = F.normalize(F.relu(F.dropout(self.wu(u.view(-1, u.size(-1))), training = self.training)))
-		v_ = F.normalize(F.relu(F.dropout(self.wv(v.view(-1, v.size(-1))), training = self.training)))
-		s = self.ws(F.relu(F.dropout(self.wc(torch.cat((u_, v_), -1)), training = self.training))).view_as(d)
-		
-		sneg = s * (1 - pos)
-		i, j = min([(s.data[i, j], (i, j)) for i, j in pos.data.nonzero()])[1]
-		k, l = sneg.data.max(1, keepdim = True)[1][[i, j], ...].squeeze(1)
+    def __init__(self, dilation = False):
+        super(resnet18, self).__init__()
+        pretrained = torchvision.models.resnet18(pretrained = True)
+        for module in filter(lambda m: type(m) == nn.BatchNorm2d, pretrained.modules()):
+            module.eval()
+            module.train = lambda _: None
 
-		E_m = F.relu(Alpha - s[i, j] + s[i, k]) + F.relu(Alpha - s[i, j] + s[j, l])
-		E_e = F.relu(Beta + d[i, j] - d[i, k]) + F.relu(Beta + d[i, j] - d[j, l])
+        if dilation:
+            pretrained.layer4[0].conv1.dilation = (2, 2)
+            pretrained.layer4[0].conv1.padding = (2, 2)
+            pretrained.layer4[0].conv1.stride = (1, 1)
+            pretrained.layer4[0].downsample[0].stride = (1, 1)
 
-		return E_m + Lambda * E_e
-	
-	optimizer_params = dict(lr = 1e-4, momentum = 0.9, weight_decay = 5e-4)
-	lr_scheduler_params = dict(step_size = 10, gamma = 0.1)
+        for module_name in ['conv1', 'bn1', 'relu', 'maxpool', 'layer1', 'layer2', 'layer3', 'layer4', 'avgpool']:
+            self.add_module(module_name, getattr(pretrained, module_name))
 
-class Margin(Model):
-	def forward(self, input):
-		return F.normalize(Model.forward(self, input))
 
-	def criterion(self, embeddings, labels, alpha = 0.2, beta = 1.2, distance_threshold = 0.5, inf = 1e6, eps = 1e-6, distance_weighted_sampling = False):
-		d = pdist(embeddings)
-		pos = torch.eq(*[labels.unsqueeze(dim).expand_as(d) for dim in [0, 1]]).type_as(d) - torch.autograd.Variable(torch.eye(len(d))).type_as(d)
-		num_neg = int(pos.data.sum() / len(pos))
-		if distance_weighted_sampling:
-			neg = torch.autograd.Variable(torch.zeros_like(pos.data).scatter_(1, torch.multinomial((d.data.clamp(min = distance_threshold).pow(embeddings.size(-1) - 2) * (1 - d.data.clamp(min = distance_threshold).pow(2) / 4).pow(0.5 * (embeddings.size(-1) - 3))).reciprocal().masked_fill_(pos.data + torch.eye(len(d)).type_as(d.data) > 0, eps), replacement = False, num_samples = num_neg), 1))
-		else:
-			neg = topk_mask(d  + inf * ((pos > 0) + (d < distance_threshold)).type_as(d), dim = 1, largest = False, K = num_neg)
-		L = F.relu(alpha + (pos * 2 - 1) * (d - beta))
-		M = ((pos + neg > 0) * (L > 0)).float()
-		return (M * L).sum() / M.sum()
+class resnet50(nn.Sequential):
+    output_size = 2048
+    input_side = 224
+    rescale = 1
+    rgb_mean = [0.485, 0.456, 0.406]
+    rgb_std = [0.229, 0.224, 0.225]
 
-	optimizer = torch.optim.Adam
-	optimizer_params = dict(lr = 1e-3, weight_decay = 1e-4, base_model_lr_mult = 1e-2)
-	#optimizer_params = dict(lr = 1e-3, momentum = 0.9, weight_decay = 5e-4, base_model_lr_mult = 1)
-	#lr_scheduler_params = dict(step_size = 10, gamma = 0.5)
+    def __init__(self, dilation = False):
+        super(resnet50, self).__init__()
+        pretrained = torchvision.models.resnet50(pretrained = True)
+        for module in filter(lambda m: type(m) == nn.BatchNorm2d, pretrained.modules()):
+            module.eval()
+            module.train = lambda _: None
+
+        if dilation:
+            pretrained.layer4[0].conv1.dilation = (2, 2)
+            pretrained.layer4[0].conv1.padding = (2, 2)
+            pretrained.layer4[0].conv1.stride = (1, 1)
+            pretrained.layer4[0].downsample[0].stride = (1, 1)
+
+        for module_name in ['conv1', 'bn1', 'relu', 'maxpool', 'layer1', 'layer2', 'layer3', 'layer4', 'avgpool']:
+            self.add_module(module_name, getattr(pretrained, module_name))
+
+
+class inception_v1_googlenet(nn.Sequential):
+    output_size = 1024
+    input_side = 227
+    rescale = 255.0
+    rgb_mean = [122.7717, 115.9465, 102.9801]
+    rgb_std = [1, 1, 1]
+
+    def __init__(self):
+        super(inception_v1_googlenet, self).__init__(OrderedDict([
+            ('conv1', nn.Sequential(OrderedDict([
+                ('7x7_s2', nn.Conv2d(3, 64, (7, 7), (2, 2), (3, 3))),
+                ('relu1', nn.ReLU(True)),
+                ('pool1', nn.MaxPool2d((3, 3), (2, 2), ceil_mode=True)),
+                ('lrn1', nn.CrossMapLRN2d(5, 0.0001, 0.75, 1))
+            ]))),
+
+            ('conv2', nn.Sequential(OrderedDict([
+                ('3x3_reduce', nn.Conv2d(64, 64, (1, 1), (1, 1), (0, 0))),
+                ('relu1', nn.ReLU(True)),
+                ('3x3', nn.Conv2d(64, 192, (3, 3), (1, 1), (1, 1))),
+                ('relu2', nn.ReLU(True)),
+                ('lrn2', nn.CrossMapLRN2d(5, 0.0001, 0.75, 1)),
+                ('pool2', nn.MaxPool2d((3, 3), (2, 2), ceil_mode=True))
+            ]))),
+
+            ('inception_3a', _InceptionModule(192, 64, 96, 128, 16, 32, 32)),
+            ('inception_3b', _InceptionModule(256, 128, 128, 192, 32, 96, 64)),
+
+            ('pool3', nn.MaxPool2d((3, 3), (2, 2), ceil_mode=True)),
+
+            ('inception_4a', _InceptionModule(480, 192, 96, 208, 16, 48, 64)),
+            ('inception_4b', _InceptionModule(512, 160, 112, 224, 24, 64, 64)),
+            ('inception_4c', _InceptionModule(512, 128, 128, 256, 24, 64, 64)),
+            ('inception_4d', _InceptionModule(512, 112, 144, 288, 32, 64, 64)),
+            ('inception_4e', _InceptionModule(528, 256, 160, 320, 32, 128, 128)),
+
+            ('pool4', nn.MaxPool2d((3, 3), (2, 2), ceil_mode=True)),
+
+            ('inception_5a', _InceptionModule(832, 256, 160, 320, 32, 128, 128)),
+            ('inception_5b', _InceptionModule(832, 384, 192, 384, 48, 128, 128)),
+
+            ('pool5', nn.AvgPool2d((7, 7), (1, 1), ceil_mode=True)),
+
+            # ('drop5', nn.Dropout(0.4))
+        ]))
+
+
+class _InceptionModule(nn.Module):
+    def __init__(self, inplane, outplane_a1x1, outplane_b3x3_reduce, outplane_b3x3, outplane_c5x5_reduce, outplane_c5x5,
+                 outplane_pool_proj):
+        super(_InceptionModule, self).__init__()
+        a = nn.Sequential(OrderedDict([
+            ('1x1', nn.Conv2d(inplane, outplane_a1x1, (1, 1), (1, 1), (0, 0))),
+            ('1x1_relu', nn.ReLU(True))
+        ]))
+
+        b = nn.Sequential(OrderedDict([
+            ('3x3_reduce', nn.Conv2d(inplane, outplane_b3x3_reduce, (1, 1), (1, 1), (0, 0))),
+            ('3x3_relu1', nn.ReLU(True)),
+            ('3x3', nn.Conv2d(outplane_b3x3_reduce, outplane_b3x3, (3, 3), (1, 1), (1, 1))),
+            ('3x3_relu2', nn.ReLU(True))
+        ]))
+
+        c = nn.Sequential(OrderedDict([
+            ('5x5_reduce', nn.Conv2d(inplane, outplane_c5x5_reduce, (1, 1), (1, 1), (0, 0))),
+            ('5x5_relu1', nn.ReLU(True)),
+            ('5x5', nn.Conv2d(outplane_c5x5_reduce, outplane_c5x5, (5, 5), (1, 1), (2, 2))),
+            ('5x5_relu2', nn.ReLU(True))
+        ]))
+
+        d = nn.Sequential(OrderedDict([
+            ('pool_pool', nn.MaxPool2d((3, 3), (1, 1), (1, 1))),
+            ('pool_proj', nn.Conv2d(inplane, outplane_pool_proj, (1, 1), (1, 1), (0, 0))),
+            ('pool_relu', nn.ReLU(True))
+        ]))
+
+        for container in [a, b, c, d]:
+            for name, module in container.named_children():
+                self.add_module(name, module)
+
+        self.branches = [a, b, c, d]
+
+    def forward(self, input):
+        return torch.cat([branch(input) for branch in self.branches], 1)
+
+

@@ -1,2 +1,10 @@
 data/
 *.pyc
+
+__pycache__/
+
+.gitignore
+
+.idea/*
+
+.idea
