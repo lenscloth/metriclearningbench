@@ -1,8 +1,6 @@
 import os
 import scipy.io
-import torch
-import torch.utils.data as data
-import torchvision
+
 from torchvision.datasets import ImageFolder
 from torchvision.datasets import CIFAR10
 from torchvision.datasets.folder import default_loader

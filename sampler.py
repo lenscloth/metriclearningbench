@@ -31,7 +31,7 @@ def triplet(batch_size, dataset):
         yield example_indices[:batch_size]
 
 
-def npairs(batch_size, dataset, K=30):
+def npairs(batch_size, dataset, K=4):
     images_by_class = index_dataset(dataset)
     for batch_idx in range(int(math.ceil(len(dataset) * 1.0 / batch_size))):
         example_indices = [sample_from_class(images_by_class, class_label_ind) for k in range(int(math.ceil(batch_size * 1.0 / K))) for class_label_ind in [random.choice(list(images_by_class.keys()))] for i in range(K)]

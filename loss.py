@@ -101,7 +101,7 @@ class Margin(MetricLoss):
         return F.normalize(MetricLoss.forward(self, input))
 
     def criterion(self, embeddings, labels, alpha=0.2, beta=1.2, distance_threshold=0.5, inf=1e6, eps=1e-6,
-                  distance_weighted_sampling=False):
+                  distance_weighted_sampling=True):
         d = pdist(embeddings)
         pos = torch.eq(*[labels.unsqueeze(dim).expand_as(d) for dim in [0, 1]]).type_as(d) - torch.autograd.Variable(
             torch.eye(len(d))).type_as(d)
@@ -112,14 +112,13 @@ class Margin(MetricLoss):
                 2) / 4).pow(0.5 * (embeddings.size(-1) - 3))).reciprocal().masked_fill_(
                 pos.data + torch.eye(len(d)).type_as(d.data) > 0, eps), replacement=False, num_samples=num_neg), 1))
         else:
-            neg = topk_mask(d + inf * ((pos > 0) + (d < distance_threshold)).type_as(d), dim=1, largest=False,
-                            K=num_neg)
+            neg = topk_mask(d + inf * ((pos > 0) + (d < distance_threshold)).type_as(d), dim=1, largest=False, K=num_neg)
         L = F.relu(alpha + (pos * 2 - 1) * (d - beta))
         M = ((pos + neg > 0) * (L > 0)).float()
         return (M * L).sum() / M.sum()
 
     optimizer = torch.optim.Adam
     optimizer_params = dict(lr=1e-3, weight_decay=1e-4, base_model_lr_mult=1e-2)
+    lr_scheduler_params = dict(step_size =20, gamma = 0.1)
 
 # optimizer_params = dict(lr = 1e-3, momentum = 0.9, weight_decay = 5e-4, base_model_lr_mult = 1)
-# lr_scheduler_params = dict(step_size = 10, gamma = 0.5)
