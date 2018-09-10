@@ -1,19 +1,23 @@
 import os
-import time
 import random
 import argparse
-import itertools
 import pickle
-import torch.utils.data
+import dataset
+
+import model.backbone as backbone
+
+import torch
+import torch.optim as optim
 import torchvision.transforms as transforms
 
-import dataset
-import model
-import loss
-import sampler
+from tqdm import tqdm
+from utils import recall
+from metric import loss
+from model import BaseEmbedding, NoEmbedding
+from torch.utils.data import DataLoader
+from metric.sampler.batch import NPairs
+from metric.sampler.pair import RandomNegative, HardNegative, SemiHardNegative, DistanceWeighted
 
-from torch.utils.data.sampler import Sampler as BaseSampler
-from utils import pdist
 
 parser = argparse.ArgumentParser()
 LookupChoices = type('', (argparse.Action, ), dict(__call__=lambda a, p, n, v, o: setattr(n, a.dest, a.choices[v])))
@@ -26,37 +30,37 @@ parser.add_argument('--dataset',
                     action=LookupChoices)
 
 parser.add_argument('--base',
-                    choices=dict(inception_v1_googlenet=model.inception_v1_googlenet,
-                                 resnet18=model.resnet18,
-                                 resnet50=model.resnet50,
-                                 vgg16bn=model.vgg16bn,
-                                 vgg19bn=model.vgg19bn),
-                    default=model.resnet50,
+                    choices=dict(inception_v1=backbone.inception_v1,
+                                 resnet18=backbone.resnet18,
+                                 resnet50=backbone.resnet50,
+                                 vgg16bn=backbone.vgg16bn,
+                                 vgg19bn=backbone.vgg19bn),
+                    default=backbone.resnet50,
+                    action=LookupChoices)
+
+parser.add_argument('--sample',
+                    choices=dict(random=RandomNegative,
+                                 hard=HardNegative,
+                                 semihard=SemiHardNegative,
+                                 distance=DistanceWeighted),
+                    default=RandomNegative,
                     action=LookupChoices)
 
 parser.add_argument('--loss',
-                    choices = dict(liftedstruct=loss.LiftedStruct,
-                                   triplet=loss.Triplet,
-                                   tripletratio=loss.TripletRatio,
-                                   pddm=loss.Pddm,
-                                   untrained=loss.Untrained,
-                                   margin=loss.Margin),
-                    default=loss.Margin,
+                    choices=dict(triplet=lambda *args, **kwargs:loss.Triplet(*args, squared=False, **kwargs),
+                                 triplet_squared=lambda *args, **kwargs:loss.Triplet(*args, squared=True, **kwargs)),
+                    default=loss.Triplet,
                     action=LookupChoices)
 
-parser.add_argument('--sampler',
-                    choices = dict(simple=sampler.simple,
-                                   triplet=sampler.triplet,
-                                   npairs=sampler.npairs),
-                    default = sampler.npairs,
-                    action = LookupChoices)
+parser.add_argument('--no_pretrained', default=False, action='store_true')
+parser.add_argument('--no_embedding', default=False, action='store_true')
+parser.add_argument('--no_normalize', default=False, action='store_true')
 
+parser.add_argument('--lr', default=0.1, type=float)
 parser.add_argument('--data', default='data')
-parser.add_argument('--log', default='data/log.txt')
-parser.add_argument('--seed', default=1, type = int)
-parser.add_argument('--threads', default=16, type = int)
-parser.add_argument('--epochs', default=60, type = int)
-parser.add_argument('--batch', default=128, type = int)
+parser.add_argument('--seed', default=1, type=int)
+parser.add_argument('--epochs', default=200, type=int)
+parser.add_argument('--batch', default=128, type=int)
 parser.add_argument('--embedding_size', default=128, type=int)
 parser.add_argument('--save', default=None)
 opts = parser.parse_args()
@@ -65,81 +69,112 @@ for set_random_seed in [random.seed, torch.manual_seed, torch.cuda.manual_seed_a
     set_random_seed(opts.seed)
 
 
-def recall(embeddings, labels, K=1):
-    D = pdist(embeddings, squared=True)
-    knn_inds = D.topk(1 + K, dim=1, largest=False)[1][:, 1:]
-    return (labels.unsqueeze(-1).expand_as(knn_inds) == labels[knn_inds.contiguous().view(-1)].view_as(knn_inds)).max(1)[0].float().mean()
+base_model = opts.base(pretrained=not opts.no_pretrained)
 
-base_model = opts.base()
-base_model_weights_path = os.path.join(opts.data, opts.base.__name__ + '.pkl')
-if os.path.exists(base_model_weights_path):
+if isinstance(base_model, backbone.inception_v1):
+    base_model_weights_path = os.path.join(opts.data, opts.base.__name__ + '.pkl')
     f = open(base_model_weights_path, 'rb')
     p = pickle.load(f, encoding='bytes')
     d = {k.decode('utf-8'): torch.from_numpy(p[k]) for k in p.keys()}
     base_model.load_state_dict(d)
+    print("Inception V1: Loaded model at %s" % base_model_weights_path)
 
-normalize = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Lambda(lambda x: x * base_model.rescale),
-    transforms.Normalize(mean = base_model.rgb_mean, std = base_model.rgb_std),
-    transforms.Lambda(lambda x: x[[2, 1, 0], ...])
-])
+    train_transform = transforms.Compose([
+        transforms.Resize(256),
+        transforms.RandomCrop(227),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Lambda(lambda x: x * 255.0),
+        transforms.Normalize(mean=[122.7717, 115.9465, 102.9801], std=[1, 1, 1]),
+        transforms.Lambda(lambda x: x[[2, 1, 0], ...])
+    ])
 
-dataset_train = opts.dataset(opts.data, train=True, transform=transforms.Compose([
-    transforms.RandomResizedCrop(base_model.input_side),
-    transforms.RandomHorizontalFlip(),
-    normalize
-]), download = True)
+    test_transform = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(227),
+        transforms.ToTensor(),
+        transforms.Lambda(lambda x: x * 255.0),
+        transforms.Normalize(mean=[122.7717, 115.9465, 102.9801], std=[1, 1, 1]),
+        transforms.Lambda(lambda x: x[[2, 1, 0], ...])
+    ])
 
-dataset_eval = opts.dataset(opts.data, train=False, transform = transforms.Compose([
-    transforms.Resize(256),
-    transforms.CenterCrop(base_model.input_side),
-    normalize
-]), download=True)
+else:
+    train_transform = transforms.Compose([
+        transforms.Resize(256),
+        transforms.RandomCrop(224),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
+    test_transform = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
 
-adapt_sampler = lambda batch, dataset, sampler, **kwargs: type('', (BaseSampler,), dict(__len__ = dataset.__len__, __iter__ = lambda _: itertools.chain.from_iterable(sampler(batch, dataset, **kwargs))))(None)
-loader_train = torch.utils.data.DataLoader(dataset_train, sampler=adapt_sampler(opts.batch, dataset_train, opts.sampler), num_workers = opts.threads, batch_size = opts.batch, drop_last = True, pin_memory = True)
-loader_eval = torch.utils.data.DataLoader(dataset_eval, shuffle=False, num_workers = opts.threads, batch_size = opts.batch, pin_memory = True)
+dataset_train = opts.dataset(opts.data, train=True, transform=train_transform, download=True)
+dataset_eval = opts.dataset(opts.data, train=False, transform=test_transform, download=True)
 
-model = opts.loss(base_model, dataset_train.num_training_classes, embedding_size=opts.embedding_size).cuda()
-model_weights, model_biases, base_model_weights, base_model_biases = [[p for k, p in model.named_parameters() if p.requires_grad and ('bias' in k) == is_bias and ('base' in k) == is_base] for is_base in [False, True] for is_bias in [False, True]]
+loader_train = DataLoader(dataset_train, batch_sampler=NPairs(dataset_train, opts.batch, m=5),
+                          num_workers=1, pin_memory=True)
+loader_eval = DataLoader(dataset_eval, shuffle=False, batch_size=opts.batch, drop_last=False,
+                         num_workers=1, pin_memory=True)
 
-base_model_lr_mult = model.optimizer_params.pop('base_model_lr_mult', 1.0)
-optimizer = model.optimizer([dict(params = base_model_weights, lr = base_model_lr_mult * model.optimizer_params['lr']),
-                             dict(params = base_model_biases, lr = base_model_lr_mult * model.optimizer_params['lr'], weight_decay = 0.0),
-                             dict(params = model_biases, weight_decay = 0.0)],
-                            **model.optimizer_params)
-scheduler = torch.optim.lr_scheduler.StepLR(optimizer, **model.lr_scheduler_params)
+if opts.no_embedding:
+    model = NoEmbedding(base_model, normalize=not opts.no_normalize).cuda()
+else:
+    model = BaseEmbedding(base_model,
+                          output_size=base_model.output_size,
+                          embedding_size=opts.embedding_size,
+                          normalize=not opts.no_normalize).cuda()
 
-log = open(opts.log, 'w')
-for epoch in range(opts.epochs):
-    scheduler.step()
-    model.train()
+
+criterion = opts.loss(sampler=opts.sample())
+optimizer = optim.SGD(model.parameters(), momentum=0.9, lr=opts.lr)
+lr_scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.9)
+
+
+def train(net, loader, ep, scheduler=None):
+    if scheduler is not None:
+        scheduler.step()
+    net.train()
     loss_all, norm_all = [], []
-    for batch_idx, batch in enumerate(loader_train if model.criterion is not None else []):
-        tic = time.time()
-        images, labels = [torch.autograd.Variable(tensor.cuda()) for tensor in batch]
-        loss = model.criterion(model(images), labels)
-        loss_all.append(loss.data[0])
+
+    train_iter = tqdm(loader)
+    for images, labels in train_iter:
+        images, labels = images.cuda(), labels.cuda()
+        loss = criterion(net(images), labels)
+        loss_all.append(loss.item())
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        print('train {:>3}.{:05}  loss  {:.04f}   hz {:.02f}'.format(epoch, batch_idx, loss_all[-1], len(images) / (time.time() - tic)))
-    log.write('loss epoch {}: {:.04f}\n'.format(epoch, torch.Tensor(loss_all or [0.0]).mean()))
+        train_iter.set_description("[Train][Epoch %d] Loss: %.5f" % (ep, loss.item()))
+    print('[Epoch %d] Loss: %.5f\n' % (ep, torch.Tensor(loss_all).mean()))
 
+
+def eval(net, loader, ep):
+    net.eval()
+    test_iter = tqdm(loader)
+    embeddings_all, labels_all = [], []
+
+    with torch.no_grad():
+        for images, labels in test_iter:
+            images, labels = images.cuda(), labels.cuda()
+            output = net(images)
+            embeddings_all.append(output.data)
+            labels_all.append(labels.data)
+            test_iter.set_description("[Eval][Epoch %d]" % ep)
+
+        embeddings_all = torch.cat(embeddings_all).cpu()
+        labels_all = torch.cat(labels_all).cpu()
+        print('[Epoch %d] Recall@1: [%.6f]\n' % (ep, recall(embeddings_all, labels_all)))
+
+
+#eval(model, loader_eval, 0)
+for epoch in range(1, opts.epochs+1):
+    train(model, loader_train, epoch, scheduler=lr_scheduler)
     if epoch % 5 == 0:
-        model.eval()
-        embeddings_all, labels_all = [], []
-        for batch_idx, batch in enumerate(loader_eval):
-            tic = time.time()
-            images, labels = [torch.autograd.Variable(tensor.cuda()) for tensor in batch]
-            with torch.no_grad():
-                output = model(images)
-            embeddings_all.append(output.data.cpu())
-            labels_all.append(labels.data.cpu())
-            print('eval  {:>3}.{:05}  hz {:.02f}'.format(epoch, batch_idx, len(images) / (time.time() - tic)))
-        log.write('recall@1 epoch {}: {:.06f}\n'.format(epoch, recall(torch.cat(embeddings_all), torch.cat(labels_all))))
-        log.flush()
+        eval(model, loader_eval, epoch)
+
 
 if opts.save is not None:
     torch.save(model.state_dict(), opts.save)

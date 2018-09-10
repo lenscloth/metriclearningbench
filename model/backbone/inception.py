@@ -1,100 +1,18 @@
-from collections import OrderedDict
 import torch.nn as nn
-import torchvision
 import torch
 
-torchvision.models.inception_v3()
+from collections import OrderedDict
+from torchvision.models.inception import inception_v3
 
-class vgg16bn(nn.Module):
-    rgb_mean = [0.485, 0.456, 0.406]
-    rgb_std = [0.229, 0.224, 0.225]
-    input_side = 224
-    output_size = 512
-    rescale = 1
-
-    def __init__(self):
-        super(vgg16bn, self).__init__()
-        m = torchvision.models.vgg16_bn(pretrained=True)
-        self.feat = m.features
-        self.embedding = m.classifier[:4]
-
-    def forward(self, x):
-        x = self.feat(x)
-        x = x.view(x.size(0), -1)
-        x = self.embedding(x)
-        return x
+__all__ = ['inception_v1', 'inception_v3']
 
 
-class vgg19bn(nn.Sequential):
-    rgb_mean = [0.485, 0.456, 0.406]
-    rgb_std = [0.229, 0.224, 0.225]
-    input_side = 224
-    output_size = 512
-    rescale = 1
-
-    def __init__(self):
-        super(vgg19bn, self).__init__()
-        self.add_module('vgg19bn', torchvision.models.vgg19_bn(pretrained=True).features)
-        self.add_module('avgpool', nn.AdaptiveMaxPool2d((1, 1)))
-
-
-class resnet18(nn.Sequential):
-    output_size = 512
-    input_side = 224
-    rescale = 1
-    rgb_mean = [0.485, 0.456, 0.406]
-    rgb_std = [0.229, 0.224, 0.225]
-
-    def __init__(self, dilation = False):
-        super(resnet18, self).__init__()
-        pretrained = torchvision.models.resnet18(pretrained = True)
-        for module in filter(lambda m: type(m) == nn.BatchNorm2d, pretrained.modules()):
-            module.eval()
-            module.train = lambda _: None
-
-        if dilation:
-            pretrained.layer4[0].conv1.dilation = (2, 2)
-            pretrained.layer4[0].conv1.padding = (2, 2)
-            pretrained.layer4[0].conv1.stride = (1, 1)
-            pretrained.layer4[0].downsample[0].stride = (1, 1)
-
-        for module_name in ['conv1', 'bn1', 'relu', 'maxpool', 'layer1', 'layer2', 'layer3', 'layer4', 'avgpool']:
-            self.add_module(module_name, getattr(pretrained, module_name))
-
-
-class resnet50(nn.Sequential):
-    output_size = 2048
-    input_side = 224
-    rescale = 1
-    rgb_mean = [0.485, 0.456, 0.406]
-    rgb_std = [0.229, 0.224, 0.225]
-
-    def __init__(self, dilation = False):
-        super(resnet50, self).__init__()
-        pretrained = torchvision.models.resnet50(pretrained = True)
-        for module in filter(lambda m: type(m) == nn.BatchNorm2d, pretrained.modules()):
-            module.eval()
-            module.train = lambda _: None
-
-        if dilation:
-            pretrained.layer4[0].conv1.dilation = (2, 2)
-            pretrained.layer4[0].conv1.padding = (2, 2)
-            pretrained.layer4[0].conv1.stride = (1, 1)
-            pretrained.layer4[0].downsample[0].stride = (1, 1)
-
-        for module_name in ['conv1', 'bn1', 'relu', 'maxpool', 'layer1', 'layer2', 'layer3', 'layer4', 'avgpool']:
-            self.add_module(module_name, getattr(pretrained, module_name))
-
-
-class inception_v1_googlenet(nn.Sequential):
+class inception_v1(nn.Sequential):
     output_size = 1024
     input_side = 227
-    rescale = 255.0
-    rgb_mean = [122.7717, 115.9465, 102.9801]
-    rgb_std = [1, 1, 1]
 
-    def __init__(self):
-        super(inception_v1_googlenet, self).__init__(OrderedDict([
+    def __init__(self, **args):
+        super(inception_v1, self).__init__(OrderedDict([
             ('conv1', nn.Sequential(OrderedDict([
                 ('7x7_s2', nn.Conv2d(3, 64, (7, 7), (2, 2), (3, 3))),
                 ('relu1', nn.ReLU(True)),
@@ -127,10 +45,13 @@ class inception_v1_googlenet(nn.Sequential):
             ('inception_5a', _InceptionModule(832, 256, 160, 320, 32, 128, 128)),
             ('inception_5b', _InceptionModule(832, 384, 192, 384, 48, 128, 128)),
 
-            ('pool5', nn.AvgPool2d((7, 7), (1, 1), ceil_mode=True)),
+            ('pool5', nn.AdaptiveAvgPool2d((1, 1))),
 
             # ('drop5', nn.Dropout(0.4))
         ]))
+
+    def forward(self, input):
+        return super().forward(input * 255)
 
 
 class _InceptionModule(nn.Module):
@@ -170,5 +91,3 @@ class _InceptionModule(nn.Module):
 
     def forward(self, input):
         return torch.cat([branch(input) for branch in self.branches], 1)
-
-
