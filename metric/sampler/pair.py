@@ -5,7 +5,7 @@ from utils import pdist
 
 BIG_NUMBER = 1e12
 
-__all__ = ['RandomNegative', 'HardNegative', 'SemiHardNegative', 'DistanceWeighted']
+__all__ = ['RandomNegative', 'AllPairs', 'HardNegative', 'SemiHardNegative', 'DistanceWeighted']
 
 
 def pos_neg_mask(labels):
@@ -28,6 +28,27 @@ class RandomNegative(nn.Module):
             neg_index = torch.multinomial(neg_mask.float()[anchor_idx], 1).squeeze(1)
 
         return anchor_idx, pos_idx, neg_index
+
+
+class AllPairs(nn.Module):
+    def forward(self, embeddings, labels):
+        with torch.no_grad():
+            pos_mask, neg_mask = pos_neg_mask(labels)
+            pos_pair_idx = pos_mask.nonzero()
+
+            apns = []
+            for pair_idx in pos_pair_idx:
+                anchor_idx = pair_idx[0]
+                neg_indices = neg_mask[anchor_idx].nonzero()
+
+                apn = torch.cat((pair_idx.unsqueeze(0).repeat(len(neg_indices), 1), neg_indices), dim=1)
+                apns.append(apn)
+            apns = torch.cat(apns, dim=0)
+            anchor_idx = apns[:, 0]
+            pos_idx = apns[:, 1]
+            neg_idx = apns[:, 2]
+
+        return anchor_idx, pos_idx, neg_idx
 
 
 class HardNegative(nn.Module):
@@ -79,7 +100,6 @@ class DistanceWeighted(nn.Module):
 
     def forward(self, embeddings, labels):
         with torch.no_grad():
-
             pos_mask, neg_mask = pos_neg_mask(labels)
             pos_pair_idx = pos_mask.nonzero()
             anchor_idx = pos_pair_idx[:, 0]
@@ -102,3 +122,4 @@ class DistanceWeighted(nn.Module):
             neg_idx = torch.multinomial(weight, 1).squeeze(1)
 
         return anchor_idx, pos_idx, neg_idx
+

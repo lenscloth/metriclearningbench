@@ -13,21 +13,15 @@ import torchvision.transforms as transforms
 from tqdm import tqdm
 from utils import recall
 from metric import loss
-from model import LinearEmbedding, NoEmbedding, ConvEmbedding
+from model import LinearEmbedding, NoEmbedding
 from torch.utils.data import DataLoader
+from model.subspace.mlp import SubSpaceMLP
 from metric.sampler.batch import NPairs
-from metric.sampler.pair import RandomNegative, AllPairs, HardNegative, SemiHardNegative, DistanceWeighted
+from metric.sampler.pair import RandomNegative, HardNegative, SemiHardNegative, DistanceWeighted
 
 
 parser = argparse.ArgumentParser()
 LookupChoices = type('', (argparse.Action, ), dict(__call__=lambda a, p, n, v, o: setattr(n, a.dest, a.choices[v])))
-
-parser.add_argument('--mode',
-                    choices=["train", "eval"],
-                    default="train")
-
-parser.add_argument('--load',
-                    default=None)
 
 parser.add_argument('--dataset',
                     choices=dict(cub2011=dataset.CUB2011MetricLearning,
@@ -37,8 +31,7 @@ parser.add_argument('--dataset',
                     action=LookupChoices)
 
 parser.add_argument('--base',
-                    choices=dict(inception_v1=backbone.inception_v1_googlenet,
-                                 resnet18=backbone.resnet18,
+                    choices=dict(resnet18=backbone.resnet18,
                                  resnet50=backbone.resnet50,
                                  vgg16bn=backbone.vgg16bn,
                                  vgg19bn=backbone.vgg19bn),
@@ -48,27 +41,20 @@ parser.add_argument('--base',
 parser.add_argument('--sample',
                     choices=dict(random=RandomNegative,
                                  hard=HardNegative,
-                                 all=AllPairs,
                                  semihard=SemiHardNegative,
                                  distance=DistanceWeighted),
                     default=RandomNegative,
                     action=LookupChoices)
 
 parser.add_argument('--loss',
-                    choices=dict(triplet=lambda *args, **kwargs: loss.NaiveTriplet(*args, squared=False, **kwargs),
-                                 triplet_squared=lambda *args, **kwargs: loss.NaiveTriplet(*args, squared=True, **kwargs),
-                                 log_triplet=lambda *args, **kwargs: loss.LogTriplet(*args, squared=False, **kwargs),
-                                 log_triplet_squared=lambda *args, **kwargs: loss.LogTriplet(*args, squared=True, **kwargs)),
+                    choices=dict(triplet=lambda *args, **kwargs:loss.NaiveTriplet(*args, squared=False, **kwargs),
+                                 triplet_squared=lambda *args, **kwargs:loss.NaiveTriplet(*args, squared=True, **kwargs)),
                     default=loss.NaiveTriplet,
                     action=LookupChoices)
 
-parser.add_argument('--embedding_type',
-                    choices=["linear", "conv", "none"],
-                    default="linear")
-
 parser.add_argument('--no_pretrained', default=False, action='store_true')
+parser.add_argument('--no_embedding', default=False, action='store_true')
 parser.add_argument('--no_normalize', default=False, action='store_true')
-parser.add_argument('--return_base_embedding', default=False, action='store_true')
 
 parser.add_argument('--lr', default=0.1, type=float)
 parser.add_argument('--data', default='data')
@@ -84,55 +70,20 @@ for set_random_seed in [random.seed, torch.manual_seed, torch.cuda.manual_seed_a
 
 
 base_model = opts.base(pretrained=not opts.no_pretrained)
-
-if isinstance(base_model, backbone.inception_v1_googlenet):
-    base_model_weights_path = os.path.join(opts.data, 'inception_v1.pkl')
-    with open(base_model_weights_path, 'rb') as f:
-        weights = pickle.load(f, encoding='bytes')
-        d = {k.decode('utf-8'): torch.from_numpy(weights[k]) for k in weights.keys()}
-        base_model.load_state_dict(d)
-
-    # f = open(base_model_weights_path, 'rb')
-    # p = pickle.load(f, encoding='bytes')
-    # d = {k.decode('utf-8'): torch.from_numpy(p[k]) for k in p.keys()}
-    # base_model.load_state_dict(d)
-    # print("Inception V1: Loaded model at %s" % base_model_weights_path)
-
-    train_transform = transforms.Compose([
-        transforms.Resize(256),
-        transforms.RandomCrop(227),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Lambda(lambda x: x * 255.0),
-        transforms.Normalize(mean=[122.7717, 115.9465, 102.9801], std=[1, 1, 1]),
-        transforms.Lambda(lambda x: x[[2, 1, 0], ...])
-    ])
-
-    test_transform = transforms.Compose([
-        transforms.Resize(256),
-        transforms.CenterCrop(227),
-        transforms.ToTensor(),
-        transforms.Lambda(lambda x: x * 255.0),
-        transforms.Normalize(mean=[122.7717, 115.9465, 102.9801], std=[1, 1, 1]),
-        transforms.Lambda(lambda x: x[[2, 1, 0], ...])
-    ])
-
-else:
-    train_transform = transforms.Compose([
-        transforms.Resize(256),
-        transforms.RandomCrop(224),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
-    test_transform = transforms.Compose([
-        transforms.Resize(256),
-        transforms.CenterCrop(224),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
+train_transform = transforms.Compose([
+    transforms.Resize(256),
+    transforms.RandomCrop(224),
+    transforms.RandomHorizontalFlip(),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
+test_transform = transforms.Compose([
+    transforms.Resize(256),
+    transforms.CenterCrop(224),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
 
 dataset_train = opts.dataset(opts.data, train=True, transform=train_transform, download=True)
 dataset_eval = opts.dataset(opts.data, train=False, transform=test_transform, download=True)
-
 
 print(len(dataset_train))
 print(len(dataset_eval))
@@ -142,28 +93,19 @@ loader_train = DataLoader(dataset_train, batch_sampler=NPairs(dataset_train, opt
 loader_eval = DataLoader(dataset_eval, shuffle=False, batch_size=opts.batch, drop_last=False,
                          num_workers=1, pin_memory=True)
 
-if opts.embedding_type == "none":
+if opts.no_embedding:
     model = NoEmbedding(base_model, normalize=not opts.no_normalize).cuda()
-elif opts.embedding_type == "linear":
+else:
     model = LinearEmbedding(base_model,
                             output_size=base_model.output_size,
                             embedding_size=opts.embedding_size,
-                            normalize=not opts.no_normalize,
-                            return_base_embedding=opts.return_base_embedding).cuda()
-elif opts.embedding_type == "conv":
-        model = ConvEmbedding(base_model,
-                          output_size=base_model.output_size,
-                          embedding_size=opts.embedding_size,
-                          normalize=not opts.no_normalize,
-                          return_base_embedding=opts.return_base_embedding).cuda()
+                            normalize=not opts.no_normalize).cuda()
 
-
-if opts.load is not None:
-    model.load_state_dict(torch.load(opts.load))
-    print("Loaded Model from %s" % opts.load)
-
-criterion = opts.loss(sampler=opts.sample())
+# subspace_net = SubSpaceMLP(n_group=3, n_hidden=128, n_layer=3, n_input=opts.embedding_size).cuda()
+# criterion = loss.AdversarialSubSpaceLoss(subspace_net, opts.loss(sampler=opts.sample()), reg=0.1)
+criterion = loss.RandomSubSpaceLoss(opts.loss(sampler=opts.sample()), n_group=3)
 optimizer = optim.SGD(model.parameters(), momentum=0.9, lr=opts.lr)
+#subspace_optimizer = optim.SGD(subspace_net.parameters(), momentum=0.9, lr=opts.lr)
 lr_scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
 
 
@@ -176,8 +118,7 @@ def train(net, loader, ep, scheduler=None):
     train_iter = tqdm(loader)
     for images, labels in train_iter:
         images, labels = images.cuda(), labels.cuda()
-        e = net(images)
-        loss = criterion(e, labels)
+        loss = criterion(net(images), labels)
         loss_all.append(loss.item())
         optimizer.zero_grad()
         loss.backward()
@@ -204,14 +145,11 @@ def eval(net, loader, ep):
         print('[Epoch %d] Recall@1: [%.6f]\n' % (ep, recall(embeddings_all, labels_all)))
 
 
-if opts.mode == "eval":
-    eval(model, loader_eval, 0)
-else:
-    #eval(model, loader_eval, 0)
-    for epoch in range(1, opts.epochs+1):
-        train(model, loader_train, epoch, scheduler=lr_scheduler)
-        if epoch % 5 == 0:
-            eval(model, loader_eval, epoch)
+for epoch in range(1, opts.epochs+1):
+    train(model, loader_train, epoch, scheduler=lr_scheduler)
+    if epoch % 5 == 0:
+        eval(model, loader_eval, epoch)
 
-    if opts.save is not None:
-        torch.save(model.state_dict(), opts.save)
+
+if opts.save is not None:
+    torch.save(model.state_dict(), opts.save)

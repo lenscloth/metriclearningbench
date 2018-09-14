@@ -2,17 +2,18 @@ import torch.nn as nn
 import torch
 
 from collections import OrderedDict
+
+__all__ = ['inception_v1_googlenet', 'inception_v3']
+
 from torchvision.models.inception import inception_v3
 
-__all__ = ['inception_v1', 'inception_v3']
 
-
-class inception_v1(nn.Sequential):
+class inception_v1_googlenet(nn.Sequential):
     output_size = 1024
     input_side = 227
 
-    def __init__(self, **args):
-        super(inception_v1, self).__init__(OrderedDict([
+    def __init__(self, *args, **kwargs):
+        super(inception_v1_googlenet, self).__init__(OrderedDict([
             ('conv1', nn.Sequential(OrderedDict([
                 ('7x7_s2', nn.Conv2d(3, 64, (7, 7), (2, 2), (3, 3))),
                 ('relu1', nn.ReLU(True)),

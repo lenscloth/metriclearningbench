@@ -11,8 +11,8 @@ class SimpleSamplingNet(nn.Module):
                                  nn.ReLU(),
                                  nn.Conv2d(256, 256, 1),
                                  nn.ReLU(),
-                                 nn.Conv2d(256, 2, 1))
+                                 nn.Conv2d(256, 1, 1))
 
     def forward(self, x):
         x = self.net(x)
-        return
+        return x
