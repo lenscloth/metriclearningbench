@@ -31,11 +31,11 @@ parser.add_argument('--dataset',
                     action=LookupChoices)
 
 parser.add_argument('--base',
-                    choices=dict(resnet18=backbone.resnet18,
-                                 resnet50=backbone.resnet50,
-                                 vgg16bn=backbone.vgg16bn,
-                                 vgg19bn=backbone.vgg19bn),
-                    default=backbone.resnet50,
+                    choices=dict(resnet18=backbone.ResNet18,
+                                 resnet50=backbone.ResNet50,
+                                 vgg16bn=backbone.VGG16BN,
+                                 vgg19bn=backbone.VGG19BN),
+                    default=backbone.ResNet50,
                     action=LookupChoices)
 
 parser.add_argument('--sample',

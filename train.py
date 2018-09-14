@@ -1,9 +1,7 @@
-import os
-import random
 import argparse
-import pickle
-import dataset
+import random
 
+import dataset
 import model.backbone as backbone
 
 import torch
@@ -37,12 +35,12 @@ parser.add_argument('--dataset',
                     action=LookupChoices)
 
 parser.add_argument('--base',
-                    choices=dict(inception_v1=backbone.inception_v1_googlenet,
-                                 resnet18=backbone.resnet18,
-                                 resnet50=backbone.resnet50,
-                                 vgg16bn=backbone.vgg16bn,
-                                 vgg19bn=backbone.vgg19bn),
-                    default=backbone.resnet50,
+                    choices=dict(inception_v1=backbone.InceptionV1,
+                                 resnet18=backbone.ResNet18,
+                                 resnet50=backbone.ResNet50,
+                                 vgg16bn=backbone.VGG16BN,
+                                 vgg19bn=backbone.VGG19BN),
+                    default=backbone.ResNet50,
                     action=LookupChoices)
 
 parser.add_argument('--sample',
@@ -72,7 +70,7 @@ parser.add_argument('--return_base_embedding', default=False, action='store_true
 
 parser.add_argument('--lr', default=0.1, type=float)
 parser.add_argument('--data', default='data')
-parser.add_argument('--seed', default=1, type=int)
+parser.add_argument('--seed', default=random.randint(1, 1000), type=int)
 parser.add_argument('--epochs', default=200, type=int)
 parser.add_argument('--batch', default=128, type=int)
 parser.add_argument('--embedding_size', default=128, type=int)
@@ -82,65 +80,50 @@ opts = parser.parse_args()
 for set_random_seed in [random.seed, torch.manual_seed, torch.cuda.manual_seed_all]:
     set_random_seed(opts.seed)
 
-
 base_model = opts.base(pretrained=not opts.no_pretrained)
-
-if isinstance(base_model, backbone.inception_v1_googlenet):
-    base_model_weights_path = os.path.join(opts.data, 'inception_v1.pkl')
-    with open(base_model_weights_path, 'rb') as f:
-        weights = pickle.load(f, encoding='bytes')
-        d = {k.decode('utf-8'): torch.from_numpy(weights[k]) for k in weights.keys()}
-        base_model.load_state_dict(d)
-
-    # f = open(base_model_weights_path, 'rb')
-    # p = pickle.load(f, encoding='bytes')
-    # d = {k.decode('utf-8'): torch.from_numpy(p[k]) for k in p.keys()}
-    # base_model.load_state_dict(d)
-    # print("Inception V1: Loaded model at %s" % base_model_weights_path)
-
-    train_transform = transforms.Compose([
-        transforms.Resize(256),
-        transforms.RandomCrop(227),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Lambda(lambda x: x * 255.0),
-        transforms.Normalize(mean=[122.7717, 115.9465, 102.9801], std=[1, 1, 1]),
-        transforms.Lambda(lambda x: x[[2, 1, 0], ...])
+if isinstance(base_model, backbone.InceptionV1):
+    normalize = transforms.Compose([
+        transforms.Lambda(lambda x: x[[2, 1, 0], ...] * 255),
+        transforms.Normalize(mean=[104, 117, 128], std=[1, 1, 1]),
     ])
-
-    test_transform = transforms.Compose([
-        transforms.Resize(256),
-        transforms.CenterCrop(227),
-        transforms.ToTensor(),
-        transforms.Lambda(lambda x: x * 255.0),
-        transforms.Normalize(mean=[122.7717, 115.9465, 102.9801], std=[1, 1, 1]),
-        transforms.Lambda(lambda x: x[[2, 1, 0], ...])
-    ])
-
 else:
-    train_transform = transforms.Compose([
-        transforms.Resize(256),
-        transforms.RandomCrop(224),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
-    test_transform = transforms.Compose([
-        transforms.Resize(256),
-        transforms.CenterCrop(224),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
+    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+
+
+def make_square(x):
+    width, height = x.size
+    big_axis = max(width, height)
+    padder = transforms.Pad((int((big_axis - width) / 2.0), int((big_axis - height) / 2.0)))
+    return padder(x)
+
+
+train_transform = transforms.Compose([
+    transforms.Lambda(lambda x: make_square(x)),
+    transforms.Resize((256, 256)),
+    transforms.RandomCrop(224),
+    transforms.RandomHorizontalFlip(),
+    transforms.ToTensor(),
+    normalize
+])
+
+
+test_transform = transforms.Compose([
+    transforms.Lambda(lambda x: make_square(x)),
+    transforms.Resize((256, 256)),
+    transforms.CenterCrop(224),
+    transforms.ToTensor(),
+    normalize
+])
 
 dataset_train = opts.dataset(opts.data, train=True, transform=train_transform, download=True)
 dataset_eval = opts.dataset(opts.data, train=False, transform=test_transform, download=True)
 
-
 print(len(dataset_train))
 print(len(dataset_eval))
 
-loader_train = DataLoader(dataset_train, batch_sampler=NPairs(dataset_train, opts.batch, m=5),
-                          num_workers=1, pin_memory=True)
-loader_eval = DataLoader(dataset_eval, shuffle=False, batch_size=opts.batch, drop_last=False,
-                         num_workers=1, pin_memory=True)
+loader_train_sample = DataLoader(dataset_train, batch_sampler=NPairs(dataset_train, opts.batch, m=5), pin_memory=True, num_workers=4)
+loader_train_eval = DataLoader(dataset_train, shuffle=False, batch_size=opts.batch, drop_last=False, pin_memory=False, num_workers=4)
+loader_eval = DataLoader(dataset_eval, shuffle=False, batch_size=opts.batch, drop_last=False, pin_memory=True, num_workers=4)
 
 if opts.embedding_type == "none":
     model = NoEmbedding(base_model, normalize=not opts.no_normalize).cuda()
@@ -151,7 +134,7 @@ elif opts.embedding_type == "linear":
                             normalize=not opts.no_normalize,
                             return_base_embedding=opts.return_base_embedding).cuda()
 elif opts.embedding_type == "conv":
-        model = ConvEmbedding(base_model,
+    model = ConvEmbedding(base_model,
                           output_size=base_model.output_size,
                           embedding_size=opts.embedding_size,
                           normalize=not opts.no_normalize,
@@ -201,16 +184,17 @@ def eval(net, loader, ep):
 
         embeddings_all = torch.cat(embeddings_all).cpu()
         labels_all = torch.cat(labels_all).cpu()
-        print('[Epoch %d] Recall@1: [%.6f]\n' % (ep, recall(embeddings_all, labels_all)))
+        print('[Epoch %d] Recall@1: [%.4f]\n' % (ep, 100 * recall(embeddings_all, labels_all)))
 
 
 if opts.mode == "eval":
     eval(model, loader_eval, 0)
 else:
-    #eval(model, loader_eval, 0)
+    eval(model, loader_eval, 0)
     for epoch in range(1, opts.epochs+1):
-        train(model, loader_train, epoch, scheduler=lr_scheduler)
+        train(model, loader_train_sample, epoch, scheduler=lr_scheduler)
         if epoch % 5 == 0:
+            eval(model, loader_train_eval, epoch)
             eval(model, loader_eval, epoch)
 
     if opts.save is not None:
