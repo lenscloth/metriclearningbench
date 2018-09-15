@@ -6,7 +6,7 @@ from utils import pdist
 from metric.sampler.pair import RandomNegative
 
 
-__all__ = ['NaiveTriplet', 'LogTriplet']
+__all__ = ['NaiveTriplet', 'LogTriplet', 'RandomSubSpaceLoss', 'RandomSubSpaceOnlySampleLoss']
 
 
 class NaiveTriplet(nn.Module):
@@ -104,7 +104,7 @@ class AdversarialSubSpaceLoss(nn.Module):
 
         loss = self.loss_maker(embeddings, labels)
         for k in range(self.spacing_net.n_group):
-            e = sampled_embedding[k]
+            e = sampled_embedding[..., k]
             loss += self.loss_maker(e, labels)
 
         loss += self.reg * (mean_spacing_prob.exp() * mean_spacing_prob.exp()).sum(dim=1).mean()
@@ -120,12 +120,56 @@ class RandomSubSpaceLoss(nn.Module):
     def forward(self, embeddings, labels):
         embed_size = embeddings.size(1)
 
-        m = torch.distributions.one_hot_categorical.OneHotCategorical(probs=torch.ones((embed_size, self.n_group), device=embeddings.device))
+        m = torch.distributions.one_hot_categorical.OneHotCategorical(probs=torch.ones((embed_size, self.n_group),
+                                                                                       device=embeddings.device))
         mask = m.sample()
-
         sampled_embedding = embeddings.unsqueeze(2) * mask.unsqueeze(0)
         loss = self.loss_maker(embeddings, labels)
         for k in range(self.n_group):
             e = sampled_embedding[k]
-            loss += self.loss_maker(e, labels)
+            loss += self.loss_maker(e, labels.repeat(10)[:e.size(0)])
+
+        # N X E x K
+
         return loss
+
+
+class RandomSubSpaceOnlySampleLoss(nn.Module):
+    def __init__(self, sampler=RandomNegative(), margin=0.2, n_group=3):
+        super(RandomSubSpaceOnlySampleLoss, self).__init__()
+        self.sampler = sampler
+        self.n_group = n_group
+        self.margin = margin
+
+    def forward(self, embeddings, labels):
+        embed_size = embeddings.size(1)
+
+        m = torch.distributions.one_hot_categorical.OneHotCategorical(probs=torch.ones((embed_size, self.n_group), device=embeddings.device))
+        mask = m.sample()
+        sampled_embedding = embeddings.unsqueeze(2) * mask.unsqueeze(0)
+
+        a_is, p_is, n_is = [], [], []
+        a_i, p_i, n_i = self.sampler(embeddings, labels)
+        a_is.append(a_i)
+        p_is.append(p_i)
+        n_is.append(n_i)
+
+        for k in range(self.n_group):
+            e = sampled_embedding[..., k]
+            a_i, p_i, n_i = self.sampler(e, labels)
+
+            a_is.append(a_i)
+            p_is.append(p_i)
+            n_is.append(n_i)
+
+        anchor_idx = torch.cat(a_is, dim=0)
+        pos_idx = torch.cat(p_is, dim=0)
+        neg_idx = torch.cat(n_is, dim=0)
+
+        d = pdist(embeddings, squared=True)
+
+        pos_val = d[anchor_idx, pos_idx]
+        neg_val = d[anchor_idx, neg_idx]
+
+        loss = (pos_val - neg_val + self.margin).clamp(min=0)
+        return loss.mean()

@@ -9,8 +9,8 @@ import torch.optim as optim
 import torchvision.transforms as transforms
 
 from tqdm import tqdm
-from utils import recall
 from metric import loss
+from utils import recall, make_square
 from model import LinearEmbedding, NoEmbedding, ConvEmbedding
 from torch.utils.data import DataLoader
 from metric.sampler.batch import NPairs
@@ -60,21 +60,31 @@ parser.add_argument('--loss',
                     default=loss.NaiveTriplet,
                     action=LookupChoices)
 
+parser.add_argument('--subspace',
+                    choices=["none", "subspace", "only_sample"],
+                    default="none")
+
+parser.add_argument('--margin', type=float, default=0.2)
 parser.add_argument('--embedding_type',
                     choices=["linear", "conv", "none"],
                     default="linear")
 
 parser.add_argument('--no_pretrained', default=False, action='store_true')
 parser.add_argument('--no_normalize', default=False, action='store_true')
-parser.add_argument('--return_base_embedding', default=False, action='store_true')
 
-parser.add_argument('--lr', default=0.1, type=float)
+parser.add_argument('--lr', default=1e-5, type=float)
 parser.add_argument('--data', default='data')
 parser.add_argument('--seed', default=random.randint(1, 1000), type=int)
-parser.add_argument('--epochs', default=200, type=int)
+parser.add_argument('--epochs', default=1000, type=int)
+parser.add_argument('--max_iter', default=1000, type=int)
+parser.add_argument('--lr_decay_iter', default=1000, type=int)
 parser.add_argument('--batch', default=128, type=int)
 parser.add_argument('--embedding_size', default=128, type=int)
 parser.add_argument('--save', default=None)
+
+parser.add_argument('--return_base_embedding', default=False, action='store_true')
+parser.add_argument('--num_workers', type=int, default=8)
+
 opts = parser.parse_args()
 
 for set_random_seed in [random.seed, torch.manual_seed, torch.cuda.manual_seed_all]:
@@ -88,13 +98,6 @@ if isinstance(base_model, backbone.InceptionV1):
     ])
 else:
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-
-
-def make_square(x):
-    width, height = x.size
-    big_axis = max(width, height)
-    padder = transforms.Pad((int((big_axis - width) / 2.0), int((big_axis - height) / 2.0)))
-    return padder(x)
 
 
 train_transform = transforms.Compose([
@@ -121,9 +124,12 @@ dataset_eval = opts.dataset(opts.data, train=False, transform=test_transform, do
 print(len(dataset_train))
 print(len(dataset_eval))
 
-loader_train_sample = DataLoader(dataset_train, batch_sampler=NPairs(dataset_train, opts.batch, m=5), pin_memory=True, num_workers=4)
-loader_train_eval = DataLoader(dataset_train, shuffle=False, batch_size=opts.batch, drop_last=False, pin_memory=False, num_workers=4)
-loader_eval = DataLoader(dataset_eval, shuffle=False, batch_size=opts.batch, drop_last=False, pin_memory=True, num_workers=4)
+loader_train_sample = DataLoader(dataset_train, batch_sampler=NPairs(dataset_train, opts.batch, m=5),
+                                 pin_memory=True, num_workers=opts.num_workers)
+loader_train_eval = DataLoader(dataset_train, shuffle=False, batch_size=opts.batch, drop_last=False,
+                               pin_memory=False, num_workers=opts.num_workers)
+loader_eval = DataLoader(dataset_eval, shuffle=False, batch_size=opts.batch, drop_last=False,
+                         pin_memory=True, num_workers=opts.num_workers)
 
 if opts.embedding_type == "none":
     model = NoEmbedding(base_model, normalize=not opts.no_normalize).cuda()
@@ -145,19 +151,42 @@ if opts.load is not None:
     model.load_state_dict(torch.load(opts.load))
     print("Loaded Model from %s" % opts.load)
 
-criterion = opts.loss(sampler=opts.sample())
-optimizer = optim.SGD(model.parameters(), momentum=0.9, lr=opts.lr)
-lr_scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
+criterion = opts.loss(sampler=opts.sample(), margin=opts.margin)
+
+if opts.subspace == "none":
+    pass
+elif opts.subspace == "subspace":
+    criterion = loss.triplet.RandomSubSpaceLoss(criterion, n_group=3)
+elif opts.subspace == "only_sample":
+    criterion = loss.triplet.RandomSubSpaceOnlySampleLoss(sampler=opts.sample(), margin=opts.margin, n_group=3)
+
+print(type(criterion))
+
+optimizer = optim.Adam([
+    {'params': base_model.parameters(), 'lr': opts.lr},
+    {'params': model.linear.parameters(), 'lr': opts.lr*10}])
+lr_scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.1)
+
+iter_count = 0
 
 
 def train(net, loader, ep, scheduler=None):
-    if scheduler is not None:
-        scheduler.step()
+    global iter_count
     net.train()
     loss_all, norm_all = [], []
 
     train_iter = tqdm(loader)
     for images, labels in train_iter:
+        iter_count += 1
+
+        if iter_count % opts.lr_decay_iter == 0:
+            if scheduler is not None:
+                print("LR Decayed!")
+                scheduler.step()
+
+        if iter_count > opts.max_iter:
+            return True
+
         images, labels = images.cuda(), labels.cuda()
         e = net(images)
         loss = criterion(e, labels)
@@ -165,8 +194,9 @@ def train(net, loader, ep, scheduler=None):
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        train_iter.set_description("[Train][Epoch %d] Loss: %.5f" % (ep, loss.item()))
-    print('[Epoch %d] Loss: %.5f\n' % (ep, torch.Tensor(loss_all).mean()))
+        train_iter.set_description("[Train][Epoch %d][Iter %d] Loss: %.5f" % (ep, iter_count, loss.item()))
+    print('[Epoch %d, #Iter: %d] Loss: %.5f\n' % (ep, iter_count, torch.Tensor(loss_all).mean()))
+    return False
 
 
 def eval(net, loader, ep):
@@ -192,10 +222,14 @@ if opts.mode == "eval":
 else:
     eval(model, loader_eval, 0)
     for epoch in range(1, opts.epochs+1):
-        train(model, loader_train_sample, epoch, scheduler=lr_scheduler)
-        if epoch % 5 == 0:
+        done = train(model, loader_train_sample, epoch, scheduler=lr_scheduler)
+
+        if epoch % 5 == 0 or done:
             eval(model, loader_train_eval, epoch)
             eval(model, loader_eval, epoch)
+
+        if done:
+            break
 
     if opts.save is not None:
         torch.save(model.state_dict(), opts.save)
