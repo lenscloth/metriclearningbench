@@ -104,7 +104,7 @@ else:
 # subspace_net = SubSpaceMLP(n_group=3, n_hidden=128, n_layer=3, n_input=opts.embedding_size).cuda()
 # criterion = loss.AdversarialSubSpaceLoss(subspace_net, opts.loss(sampler=opts.sample()), reg=0.1)
 criterion = loss.RandomSubSpaceLoss(opts.loss(sampler=opts.sample()), n_group=3)
-optimizer = optim.Adam(model.parameters(), momentum=0.9, lr=opts.lr)
+optimizer = optim.SGD(model.parameters(), momentum=0.9, lr=opts.lr)
 #subspace_optimizer = optim.SGD(subspace_net.parameters(), momentum=0.9, lr=opts.lr)
 lr_scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
 

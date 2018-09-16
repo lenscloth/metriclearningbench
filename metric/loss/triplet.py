@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from utils import pdist
-from metric.sampler.pair import RandomNegative
+from metric.sampler.pair import RandomNegative, HardNegative
 
 
 __all__ = ['NaiveTriplet', 'LogTriplet', 'RandomSubSpaceLoss', 'RandomSubSpaceOnlySampleLoss']
@@ -89,7 +89,7 @@ class AdversarialSubSpaceLoss(nn.Module):
     def __init__(self, spacing_net, loss_maker, reg=0.0):
         super(AdversarialSubSpaceLoss, self).__init__()
         self.spacing_net = spacing_net
-        self.loss_maker = loss_maker
+        self.loss_maker = NaiveTriplet(margin=0.2)
         self.reg = reg
 
     def forward(self, embeddings, labels):
@@ -135,23 +135,39 @@ class AdversarialSubSpaceLoss(nn.Module):
 #
 #         return loss
 
+# class RandomSubSpaceLoss(nn.Module):
+#     def __init__(self, loss_maker, n_group=3):
+#         super(RandomSubSpaceLoss, self).__init__()
+#         self.loss_maker = loss_maker
+#         self.n_group = n_group
+#
+#     def forward(self, embeddings, labels):
+#         embed_size = embeddings.size(1)
+#
+#         m = torch.distributions.one_hot_categorical.OneHotCategorical(probs=torch.ones((embed_size, self.n_group), device=embeddings.device))
+#         mask = m.sample()
+#         sampled_embedding = embeddings.unsqueeze(2) * mask.unsqueeze(0)
+#
+#         loss = self.loss_maker(embeddings, labels)
+#         for k in range(self.n_group):
+#             e = sampled_embedding[k]
+#             loss += self.loss_maker(e, labels)
+#         return loss
+
+
 class RandomSubSpaceLoss(nn.Module):
-    def __init__(self, loss_maker, n_group=3):
+    def __init__(self, loss_maker):
         super(RandomSubSpaceLoss, self).__init__()
         self.loss_maker = loss_maker
-        self.n_group = n_group
+        self.sample_loss = NaiveTriplet(margin=loss_maker.margin, sampler=HardNegative(), squared=loss_maker.squared)
 
     def forward(self, embeddings, labels):
-        embed_size = embeddings.size(1)
-
-        m = torch.distributions.one_hot_categorical.OneHotCategorical(probs=torch.ones((embed_size, self.n_group), device=embeddings.device))
-        mask = m.sample()
-        sampled_embedding = embeddings.unsqueeze(2) * mask.unsqueeze(0)
-
         loss = self.loss_maker(embeddings, labels)
-        for k in range(self.n_group):
-            e = sampled_embedding[k]
-            loss += self.loss_maker(e, labels)
+
+        s_l = []
+        for e in embeddings:
+            s_l.append(self.sample_loss(e.unsqueeze(1), torch.randint(0, 2, (len(e), ), device=e.device)))
+        loss += 2 *torch.stack(s_l).mean()
         return loss
 
 

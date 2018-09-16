@@ -154,16 +154,16 @@ criterion = opts.loss(sampler=opts.sample(), margin=opts.margin)
 if opts.subspace == "none":
     pass
 elif opts.subspace == "subspace":
-    criterion = loss.triplet.RandomSubSpaceLoss(criterion, n_group=3)
+    criterion = loss.triplet.RandomSubSpaceLoss(criterion)
 elif opts.subspace == "only_sample":
     criterion = loss.triplet.RandomSubSpaceOnlySampleLoss(sampler=opts.sample(), margin=opts.margin, n_group=3)
 
 print(type(criterion))
 
-optimizer = optim.Adam([
+optimizer = optim.SGD([
     {'params': base_model.parameters(), 'lr': opts.lr},
-    {'params': model.linear.parameters(), 'lr': opts.lr}])
-lr_scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
+    {'params': model.linear.parameters(), 'lr': opts.lr}], momentum=0.9)
+lr_scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.1)
 
 
 def train(net, loader, ep, scheduler=None):
@@ -201,17 +201,24 @@ def eval(net, loader, ep):
 
         embeddings_all = torch.cat(embeddings_all).cpu()
         labels_all = torch.cat(labels_all).cpu()
-        print('[Epoch %d] Recall@1: [%.4f]\n' % (ep, 100 * recall(embeddings_all, labels_all)))
+        rec = recall(embeddings_all, labels_all)
+        print('[Epoch %d] Recall@1: [%.4f]\n' % (ep, 100 * rec))
+    return rec
 
 
 if opts.mode == "eval":
     eval(model, loader_eval, 0)
 else:
+    best_rec = 0
     eval(model, loader_eval, 0)
     for epoch in range(1, opts.epochs+1):
         train(model, loader_train_sample, epoch, scheduler=lr_scheduler)
         eval(model, loader_train_eval, epoch)
-        eval(model, loader_eval, epoch)
+        rec = eval(model, loader_eval, epoch)
+
+        if best_rec < rec:
+            best_rec = rec
+        print("Best Recall@1: %.4f" % best_rec)
 
     if opts.save is not None:
         torch.save(model.state_dict(), opts.save)
