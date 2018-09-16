@@ -111,6 +111,30 @@ class AdversarialSubSpaceLoss(nn.Module):
         return loss
 
 
+# class RandomSubSpaceLoss(nn.Module):
+#     def __init__(self, loss_maker, n_group=3):
+#         super(RandomSubSpaceLoss, self).__init__()
+#         self.loss_maker = loss_maker
+#         self.n_group = n_group
+#
+#     def forward(self, embeddings, labels):
+#         embed_size = embeddings.size(1)
+#
+#         m = torch.distributions.one_hot_categorical.OneHotCategorical(probs=torch.ones((embed_size, self.n_group),
+#                                                                                        device=embeddings.device))
+#         mask = m.sample()
+#         sampled_embedding = embeddings.unsqueeze(2) * mask.unsqueeze(0)
+#         loss = self.loss_maker(embeddings, labels)
+#         e_l = []
+#         for e in embeddings:
+#             #e = embeddings[k]
+#             e_l.append(self.loss_maker(e.unsqueeze(1), labels.repeat(10)[:e.size(0)]))
+#
+#         loss += torch.stack(e_l).mean()
+#         # N X E x K
+#
+#         return loss
+
 class RandomSubSpaceLoss(nn.Module):
     def __init__(self, loss_maker, n_group=3):
         super(RandomSubSpaceLoss, self).__init__()
@@ -120,17 +144,14 @@ class RandomSubSpaceLoss(nn.Module):
     def forward(self, embeddings, labels):
         embed_size = embeddings.size(1)
 
-        m = torch.distributions.one_hot_categorical.OneHotCategorical(probs=torch.ones((embed_size, self.n_group),
-                                                                                       device=embeddings.device))
+        m = torch.distributions.one_hot_categorical.OneHotCategorical(probs=torch.ones((embed_size, self.n_group), device=embeddings.device))
         mask = m.sample()
         sampled_embedding = embeddings.unsqueeze(2) * mask.unsqueeze(0)
+
         loss = self.loss_maker(embeddings, labels)
         for k in range(self.n_group):
             e = sampled_embedding[k]
-            loss += self.loss_maker(e, labels.repeat(10)[:e.size(0)])
-
-        # N X E x K
-
+            loss += self.loss_maker(e, labels)
         return loss
 
 

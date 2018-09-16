@@ -76,8 +76,6 @@ parser.add_argument('--lr', default=1e-5, type=float)
 parser.add_argument('--data', default='data')
 parser.add_argument('--seed', default=random.randint(1, 1000), type=int)
 parser.add_argument('--epochs', default=1000, type=int)
-parser.add_argument('--max_iter', default=1000, type=int)
-parser.add_argument('--lr_decay_iter', default=1000, type=int)
 parser.add_argument('--batch', default=128, type=int)
 parser.add_argument('--embedding_size', default=128, type=int)
 parser.add_argument('--save', default=None)
@@ -164,29 +162,19 @@ print(type(criterion))
 
 optimizer = optim.Adam([
     {'params': base_model.parameters(), 'lr': opts.lr},
-    {'params': model.linear.parameters(), 'lr': opts.lr*10}])
-lr_scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.1)
-
-iter_count = 0
+    {'params': model.linear.parameters(), 'lr': opts.lr}])
+lr_scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
 
 
 def train(net, loader, ep, scheduler=None):
-    global iter_count
+    if scheduler is not None:
+        scheduler.step()
+
     net.train()
     loss_all, norm_all = [], []
 
     train_iter = tqdm(loader)
     for images, labels in train_iter:
-        iter_count += 1
-
-        if iter_count % opts.lr_decay_iter == 0:
-            if scheduler is not None:
-                print("LR Decayed!")
-                scheduler.step()
-
-        if iter_count > opts.max_iter:
-            return True
-
         images, labels = images.cuda(), labels.cuda()
         e = net(images)
         loss = criterion(e, labels)
@@ -194,9 +182,8 @@ def train(net, loader, ep, scheduler=None):
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        train_iter.set_description("[Train][Epoch %d][Iter %d] Loss: %.5f" % (ep, iter_count, loss.item()))
-    print('[Epoch %d, #Iter: %d] Loss: %.5f\n' % (ep, iter_count, torch.Tensor(loss_all).mean()))
-    return False
+        train_iter.set_description("[Train][Epoch %d] Loss: %.5f" % (ep, loss.item()))
+    print('[Epoch %d] Loss: %.5f\n' % (ep, torch.Tensor(loss_all).mean()))
 
 
 def eval(net, loader, ep):
@@ -222,14 +209,9 @@ if opts.mode == "eval":
 else:
     eval(model, loader_eval, 0)
     for epoch in range(1, opts.epochs+1):
-        done = train(model, loader_train_sample, epoch, scheduler=lr_scheduler)
-
-        if epoch % 5 == 0 or done:
-            eval(model, loader_train_eval, epoch)
-            eval(model, loader_eval, epoch)
-
-        if done:
-            break
+        train(model, loader_train_sample, epoch, scheduler=lr_scheduler)
+        eval(model, loader_train_eval, epoch)
+        eval(model, loader_eval, epoch)
 
     if opts.save is not None:
         torch.save(model.state_dict(), opts.save)
