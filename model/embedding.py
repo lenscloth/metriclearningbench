@@ -1,54 +1,25 @@
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-__all__ = ["LinearEmbedding", "ConvEmbedding"]
-
-
-class ConvEmbedding(nn.Module):
-    def __init__(self, base, output_size=512, embedding_size=128, normalize=True, return_base_embedding=False):
-        super(ConvEmbedding, self).__init__()
-        self.base = base
-        self.embedding_size = embedding_size
-        self.linear = nn.Conv1d(1, embedding_size, kernel_size=output_size-embedding_size+1)
-        self.normalize = normalize
-        self.return_base_embedding = return_base_embedding
-
-    def forward(self, input):
-        x = self.base(input).view(input.size(0), 1, -1)
-
-        if self.return_base_embedding:
-            if self.normalize:
-                return F.normalize(x, p=2, dim=1)
-            else:
-                return x
-        x = self.linear(x)[:, range(self.embedding_size), range(self.embedding_size)]
-        if self.normalize:
-            return F.normalize(x, p=2, dim=1)
-        else:
-            return x
+__all__ = ["LinearEmbedding", "NoEmbedding"]
 
 
 class LinearEmbedding(nn.Module):
-    def __init__(self, base, output_size=512, embedding_size=128, normalize=True, return_base_embedding=False):
+    def __init__(self, base, output_size=512, embedding_size=128, normalize=True):
         super(LinearEmbedding, self).__init__()
         self.base = base
-
         self.linear = nn.Linear(output_size, embedding_size)
+
         self.normalize = normalize
-        self.return_base_embedding = return_base_embedding
 
     def forward(self, input):
-        b = self.base(input).view(input.size(0), -1)
-        x = self.linear(b)
+        feat = self.base(input).view(input.size(0), -1)
+        embed = self.linear(feat)
 
         if self.normalize:
-            b = F.normalize(b, p=2, dim=1)
-            x = F.normalize(x, p=2, dim=1)
+            embed = F.normalize(embed, p=2, dim=1)
 
-        if self.return_base_embedding:
-            return b
-        return x
+        return embed
 
 
 class NoEmbedding(nn.Module):

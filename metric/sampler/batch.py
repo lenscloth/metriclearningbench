@@ -19,12 +19,11 @@ def index_dataset(dataset: ImageFolder):
 
 
 class NPairs(Sampler):
-    def __init__(self, data_source: ImageFolder, batch_size, m=5):
+    def __init__(self, data_source: ImageFolder, batch_size, m=5, iter_per_epoch=200):
         super(Sampler, self).__init__()
         self.m = m
         self.batch_size = batch_size
-        self.n_batch = int(math.floor(len(data_source) / float(batch_size)))
-
+        self.n_batch = iter_per_epoch
         self.class_idx = list(data_source.class_to_idx.values())
         self.images_by_class = index_dataset(data_source)
 

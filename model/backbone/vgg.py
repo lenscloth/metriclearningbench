@@ -4,6 +4,19 @@ import torch.nn as nn
 __all__ = ['VGG16BN', 'VGG19BN']
 
 
+class VGG16(nn.Module):
+    output_size = 512
+
+    def __init__(self):
+        super(VGG16, self).__init__()
+        m = torchvision.models.vgg16(pretrained=True)
+        self.feat = m.features
+        self.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
+
+    def forward(self, x):
+        return self.avg_pool(self.feat(x))
+
+
 class VGG16BN(nn.Module):
     output_size = 512
 

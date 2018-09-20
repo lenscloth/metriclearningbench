@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from utils import pdist
 
@@ -17,7 +18,29 @@ def pos_neg_mask(labels):
     return pos_mask, neg_mask
 
 
-class RandomNegative(nn.Module):
+class _Sampler(nn.Module):
+    def __init__(self, dist_func=pdist):
+        self.dist_func = dist_func
+        super().__init__()
+
+    def forward(self, embeddings, labels):
+        raise NotImplementedError
+
+
+class LearnableSampler(nn.Module):
+    def __init__(self, w_in, w_out):
+        self.sample_weight = nn.Sequential(nn.Linear(w_in, w_in),
+                                           nn.ReLU(),
+                                           nn.Linear(w_in, w_out))
+
+    def forward(self, embeddings, labels):
+        w = self.sample_weight(embeddings)
+        w = F.normalize(w, dim=1)
+        w = (w @ w.t())
+
+
+
+class RandomNegative(_Sampler):
     def forward(self, embeddings, labels):
         with torch.no_grad():
             pos_mask, neg_mask = pos_neg_mask(labels)
@@ -30,7 +53,7 @@ class RandomNegative(nn.Module):
         return anchor_idx, pos_idx, neg_index
 
 
-class AllPairs(nn.Module):
+class AllPairs(_Sampler):
     def forward(self, embeddings, labels):
         with torch.no_grad():
             pos_mask, neg_mask = pos_neg_mask(labels)
@@ -51,11 +74,11 @@ class AllPairs(nn.Module):
         return anchor_idx, pos_idx, neg_idx
 
 
-class HardNegative(nn.Module):
+class HardNegative(_Sampler):
     def forward(self, embeddings, labels):
         with torch.no_grad():
             pos_mask, neg_mask = pos_neg_mask(labels)
-            dist = pdist(embeddings)
+            dist = self.dist_func(embeddings)
 
             pos_pair_index = pos_mask.nonzero()
             anchor_idx = pos_pair_index[:, 0]
@@ -68,10 +91,10 @@ class HardNegative(nn.Module):
         return anchor_idx, pos_idx, neg_idx
 
 
-class SemiHardNegative(nn.Module):
+class SemiHardNegative(_Sampler):
     def forward(self, embeddings, labels):
         with torch.no_grad():
-            dist = pdist(embeddings)
+            dist = self.dist_func(embeddings)
             pos_mask, neg_mask = pos_neg_mask(labels)
             neg_dist = dist * neg_mask.float()
 
@@ -94,7 +117,7 @@ class SemiHardNegative(nn.Module):
         return anchor_idx, pos_idx, neg_idx
 
 
-class DistanceWeighted(nn.Module):
+class DistanceWeighted(_Sampler):
     cut_off = 0.5
     nonzero_loss_cutoff = 1.4
 
@@ -106,7 +129,7 @@ class DistanceWeighted(nn.Module):
             pos_idx = pos_pair_idx[:, 1]
 
             d = embeddings.size(1)
-            dist = pdist(embeddings, squared=False)
+            dist = self.dist_func(embeddings, squared=False)
             dist = dist.clamp(min=self.cut_off)
 
             log_weight = -1 * ((d - 2.0) * dist.log() + ((d - 3.0)/2.0) * (1.0 - 0.25 * (dist * dist)).log())

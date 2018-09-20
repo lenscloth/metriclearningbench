@@ -1,1 +1,1 @@
-from .embedding import LinearEmbedding, NoEmbedding, ConvEmbedding
+from .embedding import LinearEmbedding, NoEmbedding

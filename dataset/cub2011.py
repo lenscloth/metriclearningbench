@@ -45,16 +45,21 @@ class CUB2011(ImageFolder):
 class CUB2011MetricLearning(CUB2011):
     num_training_classes = 100
 
-    def __init__(self, root, train=False, transform=None, target_transform=None, download=False):
+    def __init__(self, root, train=False, split='none', transform=None, target_transform=None, download=False):
         CUB2011.__init__(self, root, transform=transform, target_transform=target_transform, download=download)
 
         if train:
-            self.classes = self.classes[:self.num_training_classes]
+            if split == 'train':
+                self.classes = self.classes[:(self.num_training_classes-20)]
+            elif split == 'val':
+                self.classes = self.classes[(self.num_training_classes-20):self.num_training_classes]
+            else:
+                self.classes = self.classes[:self.num_training_classes]
         else:
             self.classes = self.classes[self.num_training_classes:]
 
-        self.class_to_idx = {cls_label: cls_ind for cls_label, cls_ind in self.class_to_idx.items()
-                             if cls_label in self.classes}
+        self.class_to_idx = {cls_name: cls_ind for cls_name, cls_ind in self.class_to_idx.items()
+                             if cls_name in self.classes}
         self.samples = [(img_file_pth, cls_ind) for img_file_pth, cls_ind in self.imgs
                         if cls_ind in self.class_to_idx.values()]
         self.imgs = self.samples
