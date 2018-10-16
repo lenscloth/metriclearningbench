@@ -3,6 +3,7 @@ import random
 
 from torchvision.datasets import ImageFolder
 from torch.utils.data.sampler import Sampler
+import copy
 
 
 def index_dataset(dataset: ImageFolder):
@@ -45,7 +46,39 @@ class NPairs(Sampler):
 
             yield example_indices[:self.batch_size]
 
-#
+
+class ExactNPairs(Sampler):
+    def __init__(self, data_source: ImageFolder, batch_size, m=5):
+        super(Sampler, self).__init__()
+        self.m = m
+        self.batch_size = batch_size
+        self.n_batch = int(math.floor(len(data_source)/batch_size))
+        self.class_idx = list(data_source.class_to_idx.values())
+        self.images_by_class = index_dataset(data_source)
+
+    def __len__(self):
+        return self.n_batch
+
+    def __iter__(self):
+        img_by_class_copy = copy.deepcopy(self.images_by_class)
+
+        for _ in range(self.n_batch):
+            example_indices = []
+            for c in self.class_idx:
+                img_ind_of_cls = img_by_class_copy[c]
+                if len(img_ind_of_cls) == 0:
+                    continue
+                requires = min(self.batch_size - len(example_indices), 5)
+
+                if requires <= 0:
+                    break
+
+                new_ind = img_ind_of_cls[:requires]
+                img_by_class_copy[c] = img_ind_of_cls[requires:]
+                example_indices += new_ind
+
+            yield example_indices
+
 #
 # def sample_from_class(images_by_class, class_label_ind):
 #     return images_by_class[class_label_ind][random.randrange(len(images_by_class[class_label_ind]))]

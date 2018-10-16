@@ -1,35 +1,45 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from utils import pdist
-from metric.sampler.pair import RandomNegative, HardNegative
+from metric.sampler.pair import RandomNegative, HardNegative, AllPairs
 
 
-__all__ = ['L1Triplet', 'L2Triplet', 'CosineTriplet', 'RandomSubSpaceOnlySampleLoss']
+__all__ = ['L1Triplet', 'L2Triplet', 'RandomSubSpaceOnlySampleLoss']
 
 
 class _Triplet(nn.Module):
-    def __init__(self, margin=0.2, dist_func=None, sampler=None, reduce=True, size_average=True):
+    def __init__(self, p=2, margin=0.2, sampler=None, reduce=True, size_average=True, clamp_activation=False):
         super().__init__()
+        self.p = p
         self.margin = margin
-        self.dist_func = dist_func
 
         # update distance function accordingly
         self.sampler = sampler
-        self.sampler.dist_func = dist_func
+        self.sampler.dist_func = lambda e: pdist(e, squared=(p==2))
 
+        self.clamp_activation = clamp_activation
         self.reduce = reduce
         self.size_average = size_average
 
     def forward(self, embeddings, labels, weight=None):
         anchor_idx, pos_idx, neg_idx = self.sampler(embeddings, labels)
-        d = self.dist_func(embeddings)
 
-        pos_val = d[anchor_idx, pos_idx]
-        neg_val = d[anchor_idx, neg_idx]
+        anchor_embed = embeddings[anchor_idx]
+        positive_embed = embeddings[pos_idx]
+        negative_embed = embeddings[neg_idx]
 
-        loss = (pos_val - neg_val + self.margin).clamp(min=0)
+        if self.clamp_activation:
+            anchor_embed, positive_embed, negative_embed = ClampActivationTopk.apply(anchor_embed,
+                                                                                     positive_embed,
+                                                                                     negative_embed,
+                                                                                     int(embeddings.size(1)/20))
+
+        loss = F.triplet_margin_loss(anchor_embed, positive_embed, negative_embed,
+                                     margin=self.margin, p=self.p, reduction='none')
+
         if weight is not None:
             pos_weight = weight[anchor_idx, pos_idx]
             neg_weight = weight[anchor_idx, neg_idx]
@@ -46,72 +56,110 @@ class _Triplet(nn.Module):
 
 
 class L2Triplet(_Triplet):
-    def __init__(self, margin=0.2, sampler=None):
-        super().__init__(margin=margin, dist_func=lambda e: pdist(e, squared=True), sampler=sampler)
+    def __init__(self, margin=0.2, sampler=None, clamp_activation=False):
+        super().__init__(p=2, margin=margin, sampler=sampler, clamp_activation=clamp_activation)
 
 
 class L1Triplet(_Triplet):
-    def __init__(self, margin=0.2, sampler=None):
-        super().__init__(margin=margin, dist_func=lambda e: pdist(e, squared=False), sampler=sampler)
+    def __init__(self, margin=0.2, sampler=None, clamp_activation=False):
+        super().__init__(p=1, margin=margin, sampler=sampler, clamp_activation=clamp_activation)
 
 
-class CosineTriplet(_Triplet):
-    def __init__(self, margin=0.2, sampler=None):
-        def min_cosine(e):
-            norm = F.normalize(e, dim=1, p=2)
-            return -1 * (norm @ norm.t())
-        super().__init__(margin=margin, dist_func=lambda e: min_cosine(e), sampler=sampler)
-
-
-class Noise(nn.Module):
-    def __init__(self, loss):
+class MarginLoss(nn.Module):
+    def __init__(self, alpha=0.2, beta=1.2, beta_classes=None, nu=0, sampler=None):
         super().__init__()
-        self.loss = loss
-
-    def forward(self, embeddings, labels):
-        noise = embeddings.data.std(dim=0)
-        gen = torch.distributions.normal.Normal(torch.zeros(noise.size(), device=embeddings.device), noise)
-
-        l = []
-        for _ in range(5):
-            e = embeddings + 0.1 * gen.sample((embeddings.size(0),))
-            e = F.normalize(e, dim=1, p=2)
-            l.append(self.loss(e, labels))
-        return torch.stack(l).mean()
-
-
-class NaiveTriplet(nn.Module):
-    def __init__(self, margin=0.2, squared=False, sampler=RandomNegative(), reduce=True, size_average=True):
-        super(NaiveTriplet, self).__init__()
-        self.margin = margin
-        self.squared = squared
+        self.alpha = alpha
+        self.beta = beta
+        self.nu = nu
         self.sampler = sampler
-        self.reduce = reduce
-        self.size_average = size_average
+
+        if beta_classes is not None:
+            self.class_margin = nn.Parameter(beta_classes)
+        else:
+            self.class_margin = None
 
     def forward(self, embeddings, labels):
-        anchor_idx, pos_idx, neg_index = self.sampler(embeddings, labels)
+        anchor_idx, pos_idx, neg_idx = self.sampler(embeddings, labels)
 
-        d = pdist(embeddings, squared=self.squared)
+        dist = pdist(embeddings, squared=False)
 
-        pos_val = d[anchor_idx, pos_idx]
-        neg_val = d[anchor_idx, neg_index]
-
-        loss = (pos_val - neg_val + self.margin).clamp(min=0)
-
-        if not self.reduce:
-            return loss
-
-        if self.size_average:
-            return loss.mean()
+        if self.class_margin is not None:
+            beta = self.beta + self.class_margin[labels[anchor_idx]]
+            beta_reg_loss = beta.sum() * self.nu
         else:
-            return loss.sum()
+            beta = self.beta
+            beta_reg_loss = 0
+
+        pos_loss = (self.alpha + (dist[anchor_idx, pos_idx] - beta)).clamp(min=0)
+        neg_loss = (self.alpha - (dist[anchor_idx, neg_idx] - beta)).clamp(min=0)
+
+        loss = (pos_loss + neg_loss) / (len(anchor_idx) * 2)
+        return loss + beta_reg_loss
+
+
+class OnlyNegativeLoss(nn.Module):
+    def __init__(self, p=2, margin=0.2):
+        super().__init__()
+        self.p = p
+        self.margin = margin
+        self.dist_fun = lambda e: pdist(e, squared=p==2)
+
+    def forward(self, embeddings, labels):
+        d = self.dist_fun(embeddings)
+        neg_mask = (labels.unsqueeze(0) == labels.unsqueeze(1))
+        neg_idx = (d * neg_mask.float()).topk(2, dim=1, largest=False)[1][:, 1]
+
+        neg_val = d[range(len(embeddings)), neg_idx]
+        loss = (self.margin - neg_val).clamp(min=0)
+
+        return loss.mean()
+
+
+class ClampActivationMargin(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, anchor, positive, negative, squared, margin):
+        pos_d = (anchor - positive).pow(2)
+        neg_d = (anchor - negative).pow(2)
+
+        if not squared:
+            pos_d = pos_d.sqrt()
+            neg_d = neg_d.sqrt()
+
+        gap = neg_d - pos_d
+        mask = (gap < margin).float()
+        ctx.save_for_backward(mask)
+        return anchor, positive, negative
+
+    @staticmethod
+    def backward(ctx, grad_anc, grad_pos, grad_neg):
+        mask, = ctx.saved_tensors
+
+        return mask * grad_anc, mask * grad_pos, mask * grad_neg, None, None
+
+
+class ClampActivationTopk(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, anchor, positive, negative, k):
+        pos_d = (anchor - positive)
+        neg_d = (anchor - negative)
+
+        gap = neg_d - pos_d
+        mask = torch.zeros_like(gap).scatter_(1, gap.topk(k, dim=1)[1], 1.0)
+        ctx.save_for_backward(mask)
+        return anchor, positive, negative
+
+    @staticmethod
+    def backward(ctx, grad_anc, grad_pos, grad_neg):
+        mask, = ctx.saved_tensors
+
+        return mask * grad_anc, mask * grad_pos, mask * grad_neg, None
 
 
 class AdverserialGradient(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x):
         return x
+
     @staticmethod
     def backward(ctx, grad_output):
         return -1 * grad_output
@@ -129,22 +177,125 @@ class OneHotCategorical(torch.autograd.Function):
         return mask_grad
 
 
-class RandomSubSpaceLoss(nn.Module):
-    def __init__(self, loss_maker):
-        super(RandomSubSpaceLoss, self).__init__()
-        self.loss_maker = loss_maker
-        self.sample_loss = L1Triplet(margin=0.2, sampler=HardNegative())
+class GroupingLoss(nn.Module):
+    def __init__(self, criterion, group_criterion, n_group=4, ratio=1.0):
+        super().__init__()
+        self.criterion = criterion
+        self.group_criterion = group_criterion
+
+        self.ratio = ratio
+        self.n_group = n_group
 
     def forward(self, embeddings, labels):
-        loss = self.loss_maker(embeddings, labels)
+        entire_loss = self.criterion(embeddings, labels)
 
-        s_l = []
-        for e in embeddings:
-            e = e.unsqueeze(1)
-            s_l.append(self.sample_loss(e, torch.randint(0, 6, (len(e),), device=embeddings.device)))
-        loss += 2 * torch.stack(s_l).mean()
+        embed_size = embeddings.size(1)
+        m = torch.distributions.one_hot_categorical.OneHotCategorical(probs=torch.ones((embed_size, self.n_group),
+                                                                                       device=embeddings.device))
+        mask = m.sample()
+
+        grouped_embedding = embeddings.unsqueeze(2) * mask.unsqueeze(0)
+        grouped_loss = sum([self.group_criterion(grouped_embedding[..., g], labels) for g in range(self.n_group)])
+        loss = entire_loss + self.ratio * grouped_loss
+
         return loss
 
+
+class HardDarkRank(nn.Module):
+    def __init__(self, alpha=2, beta=2, permute_len=8):
+        super().__init__()
+        self.alpha = alpha
+        self.beta = beta
+        self.permute_len = permute_len
+
+    def forward(self, student, teacher):
+        score_teacher = -1 * self.alpha * pdist(teacher, squared=False).pow(self.beta)
+        score_student = -1 * self.alpha * pdist(student, squared=False).pow(self.beta)
+
+        permute_idx = score_teacher.sort(dim=1, descending=True)[1][:, 1:(self.permute_len+1)]
+        ordered_student = torch.gather(score_student, 1, permute_idx)
+
+        log_prob = (ordered_student - torch.stack([torch.logsumexp(ordered_student[:, i:], dim=1) for i in range(permute_idx.size(1))], dim=1)).sum(dim=1)
+        loss = (-1 * log_prob).mean()
+
+        return loss
+
+
+class DistillDistance(nn.Module):
+    def __init__(self, alpha=1):
+        super().__init__()
+        self.alpha = alpha
+
+    def forward(self, student, teacher):
+        with torch.no_grad():
+            t_d = pdist(teacher, squared=False)
+        d = pdist(student, squared=False)
+        loss = F.smooth_l1_loss(d, self.alpha * t_d, reduction='elementwise_mean')
+        return loss
+
+
+class DistillAngle(nn.Module):
+    def __init__(self, n_anchor=30):
+        super().__init__()
+        self.n_anchor = n_anchor
+
+    def forward(self, student, teacher):
+        batch_size = student.size(0)
+        anchor_idx = torch.multinomial(torch.ones(batch_size, device=student.device), self.n_anchor,
+                                       replacement=False)
+
+        with torch.no_grad():
+            td = torch.cat([teacher - teacher[i].unsqueeze(0) for i in anchor_idx], dim=0)
+            norm_td = F.normalize(td, p=2, dim=1)
+            t_angle = norm_td @ norm_td.t()
+
+        sd = torch.cat([student - student[i].unsqueeze(0) for i in anchor_idx], dim=0)
+        norm_sd = F.normalize(sd, p=2, dim=1)
+        s_angle = norm_sd @ norm_sd.t()
+
+        loss = F.smooth_l1_loss(s_angle, t_angle, reduction='elementwise_mean')
+        return loss
+
+
+# class RandomSubSpaceLoss(nn.Module):
+#     def __init__(self, loss_maker):
+#         super(RandomSubSpaceLoss, self).__init__()
+#         self.loss_maker = loss_maker
+#         self.embedding_per_group = 16
+#         self.sample_loss = OnlyNegativeLoss(p=1, margin=0.2)
+#         groups = torch.arange(0, 8).unsqueeze(1).repeat((1, 16)).view(-1)
+#         self.register_buffer('groups', groups)
+#
+#     def forward(self, embeddings, labels):
+#         loss = self.loss_maker(embeddings, labels)
+#
+#         s_l = []
+#         for e in embeddings:
+#             e = e.unsqueeze(1)
+#             s_l.append(self.sample_loss(e, torch.ones(len(e), device=e.device)))
+#         loss += 2 * torch.stack(s_l).mean()
+#         return loss
+#
+# class RandomSubSpaceLoss(nn.Module):
+#     def __init__(self, loss_maker, n_group=3):
+#         super(RandomSubSpaceLoss, self).__init__()
+#         self.loss_maker = loss_maker
+#         self.n_group = n_group
+#
+#     def forward(self, embeddings, labels):
+#         embed_size = embeddings.size(1)
+#
+#         m = torch.distributions.one_hot_categorical.OneHotCategorical(probs=torch.ones((embed_size, self.n_group), device=embeddings.device))
+#         mask = m.sample()
+#
+#         sampled_embedding = embeddings.unsqueeze(2) * mask.unsqueeze(0)
+#         loss = self.loss_maker(embeddings, labels)
+#         for k in range(self.n_group):
+#             e = sampled_embedding[k]
+#             loss += self.loss_maker(e, labels)
+#         return loss
+#
+#
 
 class RandomSubSpaceOnlySampleLoss(nn.Module):
     def __init__(self, loss_maker, n_group=10):

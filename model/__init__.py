@@ -1,1 +1,1 @@
-from .embedding import LinearEmbedding, NoEmbedding
+from .embedding import *

@@ -1,0 +1,2 @@
+python train.py --base inception_v1 --loss triplet_squared --sample hard --embedding_size 512 --margin 0.01 --save_dir exp/InceptionV1_TripletSquared_Hard_DIM512_MARGIN0.01 --tensorboard InceptionV1_TripletSquared_Hard_DIM512_MARGIN0.01
+python train.py --base inception_v1 --loss triplet_squared --sample semihard --embedding_size 512 --margin 0.01 --save_dir exp/InceptionV1_TripletSquared_SemiHard_DIM512_MARGIN0.01 --tensorboard InceptionV1_TripletSquared_SemiHard_DIM512_MARGIN0.01

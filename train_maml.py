@@ -15,10 +15,12 @@ from tqdm import tqdm
 from metric import loss
 from utils import recall
 from torch.autograd import grad
+from model.maml.optim import AdaGradMAML
 from torch.utils.data import DataLoader
 from metric.sampler.batch import NPairs
 from metric.sampler.pair import RandomNegative, AllPairs, HardNegative, SemiHardNegative, DistanceWeighted
 from model.maml.functionize import FunctionModule
+
 from tensorboardX import SummaryWriter
 
 
@@ -45,7 +47,7 @@ parser.add_argument('--sample',
                                  all=AllPairs,
                                  semihard=SemiHardNegative,
                                  distance=DistanceWeighted),
-                    default=RandomNegative,
+                    default=AllPairs,
                     action=LookupChoices)
 
 parser.add_argument('--loss',
@@ -55,15 +57,15 @@ parser.add_argument('--loss',
                     action=LookupChoices)
 
 parser.add_argument('--margin', type=float, default=0.2)
-parser.add_argument('--learn_sample', default=False, action='store_true')
 parser.add_argument('--no_pretrained', default=False, action='store_true')
 parser.add_argument('--no_normalize', default=False, action='store_true')
+parser.add_argument('--no_maml', default=False, action='store_true')
 
 parser.add_argument('--lr', default=0.01, type=float)
 parser.add_argument('--data', default='data')
 parser.add_argument('--seed', default=random.randint(1, 1000), type=int)
 parser.add_argument('--epochs', default=50, type=int)
-parser.add_argument('--batch', default=128, type=int)
+parser.add_argument('--batch', default=30, type=int)
 parser.add_argument('--embedding_size', default=128, type=int)
 parser.add_argument('--save_dir', default=None)
 
@@ -117,7 +119,7 @@ class SampleNet(nn.Module):
 
         w1 = self.relation(e12.unsqueeze(0))
         w2 = self.relation(e21.unsqueeze(0))
-        w = torch.sigmoid(w1 + w2) * 4
+        w = F.softmax(w1 + w2, dim=1) * len(x)
         return w.squeeze()
 
 
@@ -164,50 +166,18 @@ if opts.load is not None:
 
 
 criterion = opts.loss(sampler=opts.sample(), margin=opts.margin)
+
 optimizer = optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-5)
-sampler_optimizer = optim.Adam(sample_net.parameters(), lr=1e-3, weight_decay=1e-5)
+maml_optimizer = AdaGradMAML(model.parameters(), lr=1e-3, momentum=0.9)
 lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[15, 20, 25, 30], gamma=0.25)
+
+sampler_optimizer = optim.Adam(sample_net.parameters(), lr=1e-3, weight_decay=1e-5)
 sampler_lr_scheduler = optim.lr_scheduler.MultiStepLR(sampler_optimizer, milestones=[15, 20, 25, 30], gamma=0.25)
+
 n_iter = 0
 
 if opts.save_dir is not None and not os.path.isdir(opts.save_dir):
     os.mkdir(opts.save_dir)
-
-
-def train_sampler(ep, writer=None):
-    sampler_lr_scheduler.step()
-    sampler_iter = tqdm(loader_eval_sample)
-    loss_all = []
-
-    model.train()
-    sample_net.train()
-
-    for val_images, val_labels in sampler_iter:
-        for train_images, train_labels in loader_train_sample:
-            train_images, train_labels = train_images[:30].cuda(), train_labels[:30].cuda()
-            val_images, val_labels = val_images[:30].cuda(), val_labels[:30].cuda()
-
-            train_embedding = model(train_images)
-            weight = sample_net(train_embedding)
-
-            train_loss = criterion(train_embedding, train_labels, weight)
-            model_gradients = grad(train_loss, model.parameters(), create_graph=True)
-
-            updated_param = [p - g for p, g in zip(model.parameters(), model_gradients)]
-            updated_param = model.format_parameters(updated_param)
-            updated_embedding = model(val_images, updated_param)
-
-            val_loss = criterion(updated_embedding, val_labels)
-
-            sampler_optimizer.zero_grad()
-            val_loss.backward()
-            sampler_optimizer.step()
-
-            loss_all.append(val_loss.item())
-            sampler_iter.set_description("[Train, Sampler][Epoch %d] Train Loss: %.5f, Val Loss: %.5f" % (ep, train_loss.item(), val_loss.item()))
-
-            break
-    print('[Epoch %d, Sampler] Expected Val Loss: %.5f\n' % (ep, torch.Tensor(loss_all).mean()))
 
 
 def train(ep, writer=None):
@@ -215,23 +185,41 @@ def train(ep, writer=None):
     lr_scheduler.step()
 
     model.train()
-    sample_net.eval()
+    sample_net.train()
 
     loss_all = []
-    train_iter = tqdm(zip(loader_train_sample, loader_eval_sample))
+    train_iter = tqdm(zip(loader_train_sample, loader_eval_sample), total=len(loader_train_sample))
 
-    for images, labels in train_iter:
+    for (images, labels), (val_images, val_labels) in train_iter:
         n_iter += 1
         images, labels = images.cuda(), labels.cuda()
+        val_images, val_labels = val_images.cuda(), val_labels.cuda()
+        # weight = torch.ones((len(images), len(labels)), device=images.device, requires_grad=True)
         embedding = model(images)
 
-        if opts.learn_sample:
-            weight = sample_net(embedding)
+        if opts.no_maml:
+            weight = torch.ones((len(images), len(labels)), device=images.device)
         else:
-            weight = None
+
+            weight = sample_net(embedding)
+            loss = criterion(embedding, labels, weight)
+
+            optimizer.zero_grad()
+            model_gradients = grad(loss, model.parameters(), create_graph=True)
+
+            updated_param = maml_optimizer.update(model.parameters(), model_gradients)
+            updated_param = model.format_parameters(updated_param)
+
+            updated_embedding = model(val_images, updated_param)
+            sample_loss = criterion(updated_embedding, val_labels)
+
+            sampler_optimizer.zero_grad()
+            sample_loss.backward(retain_graph=True)
+            sampler_optimizer.step()
+
+            weight = sample_net(embedding)
 
         loss = criterion(embedding, labels, weight)
-
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -267,7 +255,7 @@ def eval(ep, loader=loader_eval):
 if opts.mode == "eval":
     eval(0)
 else:
-    # best_rec = 0
+    best_rec = 0
     # train_recall = eval(0, loader_train)
     # val_recall = eval(0, loader_eval)
     #
@@ -277,9 +265,6 @@ else:
     #
     # best_rec = val_recall
     for epoch in range(1, opts.epochs+1):
-        if opts.learn_sample:
-            train_sampler(epoch)
-
         train(epoch, writer=writer)
         train_recall = eval(epoch, loader=loader_train)
         val_recall = eval(epoch, loader=loader_eval)

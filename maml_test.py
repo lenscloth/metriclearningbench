@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from model.maml.SGD import MamlSGD
+from model.maml.optim import MamlSGD
 from torch.optim.sgd import SGD
 
 net = nn.Sequential(nn.Linear(10, 10),

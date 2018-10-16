@@ -4,6 +4,7 @@ import random
 
 import torch
 import torch.optim as optim
+import torch.nn.functional as F
 import torchvision.transforms as transforms
 
 import dataset
@@ -15,10 +16,9 @@ import metric.sampler.pair as pair
 from tqdm import tqdm
 from utils import recall, pdist
 from model import *
-from metric.sampler.batch import NPairs
+from metric.sampler.batch import NPairs, ExactNPairs
 from tensorboardX import SummaryWriter
 from torch.utils.data import DataLoader
-
 
 parser = argparse.ArgumentParser()
 LookupChoices = type('', (argparse.Action, ), dict(__call__=lambda a, p, n, v, o: setattr(n, a.dest, a.choices[v])))
@@ -68,21 +68,19 @@ parser.add_argument('--margin', type=float, default=0.2)
 parser.add_argument('--no_normalize', default=False, action='store_true')
 parser.add_argument('--no_pretrained', default=False, action='store_true')
 
-parser.add_argument('--subspace', choices=["none", "group"], default="none")
-parser.add_argument('--group_margin', type=float, default=0.1)
-parser.add_argument('--clamp_activation', default=False, action='store_true')
-
 parser.add_argument('--lr', default=1e-4, type=float)
-parser.add_argument('--lr_decay_epochs', type=int, default=[20, 40], nargs='+')
-parser.add_argument('--lr_decay_gamma', default=0.1)
+parser.add_argument('--lr_decay_epochs', type=int, default=[15, 20, 25, 30], nargs='+')
+parser.add_argument('--lr_decay_gamma', default=0.25)
 parser.add_argument('--seed', default=random.randint(1, 1000), type=int)
-parser.add_argument('--epochs', default=60, type=int)
-parser.add_argument('--batch', default=128, type=int)
+parser.add_argument('--epochs', default=20, type=int)
+parser.add_argument('--batch', default=150, type=int)
+parser.add_argument('--n_node', default=None, type=int)
 parser.add_argument('--num_image_per_class', default=5, type=int)
 parser.add_argument('--optim', default="adam", choices=["adam", "sgd"])
 
-parser.add_argument('--embedding_size', type=int, nargs='+', default=[128])
-parser.add_argument('--embedding_type', choices=["linear", "none", "distill"], default="linear")
+parser.add_argument('--embedding_size', type=int, default=128)
+parser.add_argument('--embedding_type', choices=["linear", "none"], default="linear")
+parser.add_argument('--use_graph', default=False, action='store_true')
 
 parser.add_argument('--data', default='data')
 parser.add_argument('--save_dir', default=None)
@@ -130,59 +128,63 @@ test_transform = transforms.Compose([
 ])
 
 dataset_train = opts.dataset(opts.data, train=True, transform=train_transform, download=True)
-dataset_train_eval = opts.dataset(opts.data, train=True, transform=test_transform, download=True)
 dataset_eval = opts.dataset(opts.data, train=False, transform=test_transform, download=True)
 
 print("Number of images in Training Set: %d" % len(dataset_train))
 print("Number of images in Test set: %d" % len(dataset_eval))
 
-loader_train_sample = DataLoader(dataset_train, batch_sampler=NPairs(dataset_train,
+loader_train = DataLoader(dataset_train, batch_sampler=NPairs(dataset_train,
                                                                      opts.batch,
                                                                      m=opts.num_image_per_class,
                                                                      iter_per_epoch=opts.iter_per_epoch),
-                                 pin_memory=True, num_workers=opts.num_workers)
-loader_train_eval = DataLoader(dataset_train_eval, shuffle=True, batch_size=opts.batch, drop_last=False,
+                                        pin_memory=True, num_workers=opts.num_workers)
+
+loader_train_eval = DataLoader(dataset_train, shuffle=True, batch_size=opts.batch, drop_last=False,
                                pin_memory=False, num_workers=opts.num_workers)
 loader_eval = DataLoader(dataset_eval, shuffle=True, batch_size=opts.batch, drop_last=False,
                          pin_memory=True, num_workers=opts.num_workers)
 
+# loader_train_eval = DataLoader(dataset_train, batch_sampler=ExactNPairs(dataset_train,
+#                                                                  opts.batch,
+#                                                                  m=opts.num_image_per_class),
+#                                         pin_memory=True, num_workers=opts.num_workers)
+#
+# loader_eval = DataLoader(dataset_eval, batch_sampler=ExactNPairs(dataset_eval,
+#                                                                  opts.batch,
+#                                                                  m=opts.num_image_per_class),
+#                                         pin_memory=True, num_workers=opts.num_workers)
+
 if opts.embedding_type == "none":
     model = NoEmbedding(base_model, normalize=not opts.no_normalize).cuda()
 elif opts.embedding_type == "linear":
-    if len(opts.embedding_size) == 1:
-        model = LinearEmbedding(base_model,
-                                output_size=base_model.output_size,
-                                embedding_size=opts.embedding_size[0],
-                                normalize=not opts.no_normalize).cuda()
-    else:
-        model = MultipleLinearEmbedding(base_model,
-                                        output_size=base_model.output_size,
-                                        embedding_size=opts.embedding_size,
-                                        normalize=not opts.no_normalize).cuda()
-elif opts.embedding_type == "distill":
-    model = DistillLinearEmbedding(base_model,
-                                   distil_embedding_size=512,
-                                   embedding_size=opts.embedding_size[0],
-                                   output_size=base_model.output_size,
-                                   normalize=not opts.no_normalize).cuda()
+    model = LinearEmbedding(base_model,
+                            output_size=base_model.output_size,
+                            embedding_size=opts.embedding_size,
+                            normalize=not opts.no_normalize).cuda()
+if opts.n_node is None:
+    opts.n_node = opts.batch
+
+if opts.use_graph:
+    graph_net = GraphEmbedding(in_feature=opts.embedding_size,
+                               out_feature=opts.embedding_size, n_layer=2,
+                               normalize=not opts.no_normalize,
+                               n_node=opts.n_node).cuda()
+else:
+    graph_net = None
+
 
 if opts.load is not None:
     model.load_state_dict(torch.load(opts.load))
     print("Loaded Model from %s" % opts.load)
 
-criterion = opts.loss(sampler=opts.sample(), margin=opts.margin, clamp_activation=opts.clamp_activation)
-if opts.subspace == "none":
-    pass
-elif opts.subspace == "group":
-    group_criterion = opts.loss(sampler=opts.sample(), margin=opts.group_margin)
-    criterion = loss.GroupingLoss(criterion, group_criterion, n_group=4, ratio=1.0)
-
+criterion = opts.loss(sampler=opts.sample(), margin=opts.margin)
 print(type(criterion))
 
+parameters = list(model.parameters()) + (list(graph_net.parameters()) if graph_net is not None else [])
 if opts.optim == "sgd":
-    optimizer = optim.SGD(model.parameters(), lr=opts.lr, momentum=0.9, weight_decay=1e-5)
+    optimizer = optim.SGD(parameters, lr=opts.lr, momentum=0.9, weight_decay=1e-5)
 elif opts.optim == "adam":
-    optimizer = optim.Adam(model.parameters(), lr=opts.lr, weight_decay=1e-5)
+    optimizer = optim.Adam(parameters, lr=opts.lr, weight_decay=1e-5)
 
 lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=opts.lr_decay_epochs, gamma=opts.lr_decay_gamma)
 n_iter = 0
@@ -192,20 +194,18 @@ def train(net, loader, ep, scheduler=None, writer=None):
     global n_iter
     if scheduler:
         scheduler.step()
-
     net.train()
     loss_all, norm_all = [], []
     train_iter = tqdm(loader)
     for images, labels in train_iter:
         n_iter += 1
-
         images, labels = images.cuda(), labels.cuda()
         embedding = net(images)
 
-        if embedding.dim() == 3:
-            loss = sum([criterion(embedding[:, i], labels) for i in range(embedding.size(1))])
-        else:
-            loss = criterion(embedding, labels)
+        loss = criterion(embedding, labels)
+        if graph_net is not None:
+            g_embedding = graph_net(embedding)
+            loss += criterion(g_embedding, labels)
         loss_all.append(loss.item())
 
         if writer:
@@ -220,6 +220,9 @@ def train(net, loader, ep, scheduler=None, writer=None):
 
 def eval(net, loader, ep):
     net.eval()
+    n_node = graph_net.n_node
+    graph_net.n_node = 1
+    net.return_base = False
     test_iter = tqdm(loader)
     embeddings_all, labels_all = [], []
 
@@ -228,12 +231,51 @@ def eval(net, loader, ep):
         for images, labels in test_iter:
             images, labels = images.cuda(), labels.cuda()
             embedding = net(images)
+            if graph_net is not None:
+                embedding = graph_net(embedding)
+
             embeddings_all.append(embedding.data)
             labels_all.append(labels.data)
 
         embeddings_all = torch.cat(embeddings_all).cpu()
         labels_all = torch.cat(labels_all).cpu()
         rec = recall(embeddings_all, labels_all)
+        print('[Epoch %d] Recall@1: [%.4f]\n' % (ep, 100 * rec))
+    graph_net.n_node = n_node
+    return rec
+
+
+def eval_graph(net, loader, ep):
+    net.eval()
+    graph_net.eval()
+    test_iter = tqdm(loader)
+
+    embeddings_all, labels_all = [], []
+    test_iter.set_description("[Eval][Epoch %d]" % ep)
+    with torch.no_grad():
+        for images, labels in test_iter:
+            images, labels = images.cuda(), labels.cuda()
+            embedding = net(images)
+            embeddings_all.append(embedding.data)
+            labels_all.append(labels.data)
+        embeddings_all = torch.cat(embeddings_all)
+        labels_all = torch.cat(labels_all)
+
+        d = pdist(embeddings_all)
+        pos_idx = d.topk(11, dim=1, largest=False)[1][:, 1:]
+        neg_idx = torch.randint(0, len(d), (len(d), 1), device=d.device, dtype=torch.int64)
+
+        graph_embedding = []
+        for i, e in enumerate(embeddings_all):
+            pos_embedding = embeddings_all[pos_idx[i][1:]]
+            neg_embedding = embeddings_all[torch.cat([pos_idx[j] for j in range(i-3, i-1)])]
+
+            e = torch.cat((e.unsqueeze(0), pos_embedding, neg_embedding), dim=0)
+            e = graph_net(e)
+            graph_embedding.append(e[0])
+        graph_embedding = torch.stack(graph_embedding, dim=0)
+
+        rec = recall(graph_embedding, labels_all)
         print('[Epoch %d] Recall@1: [%.4f]\n' % (ep, 100 * rec))
     return rec
 
@@ -250,7 +292,7 @@ else:
 
     best_rec = val_recall
     for epoch in range(1, opts.epochs+1):
-        train(model, loader_train_sample, epoch, scheduler=lr_scheduler, writer=writer)
+        train(model, loader_train, epoch, scheduler=lr_scheduler, writer=writer)
         train_recall = eval(model, loader_train_eval, epoch)
         val_recall = eval(model, loader_eval, epoch)
 
@@ -260,10 +302,16 @@ else:
                 if not os.path.isdir(opts.save_dir):
                     os.mkdir(opts.save_dir)
                 torch.save(model.state_dict(), "%s/%s"%(opts.save_dir, "best.pth"))
+                if graph_net is not None:
+                    torch.save(graph_net.state_dict(), "%s/%s" % (opts.save_dir, "best_graph.pth"))
+
         if opts.save_dir is not None:
             if not os.path.isdir(opts.save_dir):
                 os.mkdir(opts.save_dir)
             torch.save(model.state_dict(), "%s/%s"%(opts.save_dir, "last.pth"))
+            if graph_net is not None:
+                torch.save(graph_net.state_dict(), "%s/%s" % (opts.save_dir, "last_graph.pth"))
+
             with open("%s/result.txt"%opts.save_dir, 'w') as f:
                 f.write("Best Recall@1: %.4f\n" % (best_rec * 100))
                 f.write("Final Recall@1: %.4f\n" % (val_recall * 100))

@@ -39,7 +39,6 @@ class LearnableSampler(nn.Module):
         w = (w @ w.t())
 
 
-
 class RandomNegative(_Sampler):
     def forward(self, embeddings, labels):
         with torch.no_grad():
@@ -145,4 +144,5 @@ class DistanceWeighted(_Sampler):
             neg_idx = torch.multinomial(weight, 1).squeeze(1)
 
         return anchor_idx, pos_idx, neg_idx
+
 
