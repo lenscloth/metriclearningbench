@@ -128,18 +128,21 @@ class DistanceWeighted(_Sampler):
             pos_idx = pos_pair_idx[:, 1]
 
             d = embeddings.size(1)
-            dist = self.dist_func(embeddings, squared=False)
+            dist = (pdist(embeddings, squared=True) + torch.eye(embeddings.size(0), device=embeddings.device, dtype=torch.float32)).sqrt()
             dist = dist.clamp(min=self.cut_off)
 
-            log_weight = -1 * ((d - 2.0) * dist.log() + ((d - 3.0)/2.0) * (1.0 - 0.25 * (dist * dist)).log())
+            log_weight = ((2.0 - d) * dist.log() - ((d - 3.0)/2.0) * (1.0 - 0.25 * (dist * dist)).log())
             weight = (log_weight - log_weight.max(dim=1, keepdim=True)[0]).exp()
             weight = ((dist < self.nonzero_loss_cutoff) * neg_mask).float() * weight
 
             """
-            When all the negative pair's distance are larger thatn nonzero_loss_cutoff,
+            When all the negative pair's distance are larger than nonzero_loss_cutoff,
             We sample randomly among negative pairs
             """
-            weight = weight + ((weight.sum(dim=1) == 0).unsqueeze(1) * neg_mask).float()
+            neg_dist = neg_mask.float() * dist
+            in_range_neg_dist = (neg_dist < self.nonzero_loss_cutoff)
+            weight = weight + ((in_range_neg_dist.sum(dim=1, keepdim=True) == 0) * neg_mask).float()
+            weight = weight / (weight.sum(dim=1, keepdim=True))
             weight = weight[anchor_idx]
             neg_idx = torch.multinomial(weight, 1).squeeze(1)
 

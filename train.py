@@ -68,10 +68,6 @@ parser.add_argument('--margin', type=float, default=0.2)
 parser.add_argument('--no_normalize', default=False, action='store_true')
 parser.add_argument('--no_pretrained', default=False, action='store_true')
 
-parser.add_argument('--subspace', choices=["none", "group"], default="none")
-parser.add_argument('--group_margin', type=float, default=0.1)
-parser.add_argument('--clamp_activation', default=False, action='store_true')
-
 parser.add_argument('--lr', default=1e-4, type=float)
 parser.add_argument('--lr_decay_epochs', type=int, default=[20, 40], nargs='+')
 parser.add_argument('--lr_decay_gamma', default=0.1)
@@ -81,9 +77,7 @@ parser.add_argument('--batch', default=128, type=int)
 parser.add_argument('--num_image_per_class', default=5, type=int)
 parser.add_argument('--optim', default="adam", choices=["adam", "sgd"])
 
-parser.add_argument('--embedding_size', type=int, nargs='+', default=[128])
-parser.add_argument('--embedding_type', choices=["linear", "none", "distill"], default="linear")
-
+parser.add_argument('--embedding_size', type=int, default=128)
 parser.add_argument('--data', default='data')
 parser.add_argument('--save_dir', default=None)
 parser.add_argument('--tensorboard', type=str, default=None)
@@ -146,43 +140,25 @@ loader_train_eval = DataLoader(dataset_train_eval, shuffle=True, batch_size=opts
 loader_eval = DataLoader(dataset_eval, shuffle=True, batch_size=opts.batch, drop_last=False,
                          pin_memory=True, num_workers=opts.num_workers)
 
-if opts.embedding_type == "none":
-    model = NoEmbedding(base_model, normalize=not opts.no_normalize).cuda()
-elif opts.embedding_type == "linear":
-    if len(opts.embedding_size) == 1:
-        model = LinearEmbedding(base_model,
-                                output_size=base_model.output_size,
-                                embedding_size=opts.embedding_size[0],
-                                normalize=not opts.no_normalize).cuda()
-    else:
-        model = MultipleLinearEmbedding(base_model,
-                                        output_size=base_model.output_size,
-                                        embedding_size=opts.embedding_size,
-                                        normalize=not opts.no_normalize).cuda()
-elif opts.embedding_type == "distill":
-    model = DistillLinearEmbedding(base_model,
-                                   distil_embedding_size=512,
-                                   embedding_size=opts.embedding_size[0],
-                                   output_size=base_model.output_size,
-                                   normalize=not opts.no_normalize).cuda()
+model = LinearEmbedding(base_model,
+                        output_size=base_model.output_size,
+                        embedding_size=opts.embedding_size,
+                        normalize=not opts.no_normalize).cuda()
 
 if opts.load is not None:
     model.load_state_dict(torch.load(opts.load))
     print("Loaded Model from %s" % opts.load)
 
-criterion = opts.loss(sampler=opts.sample(), margin=opts.margin, clamp_activation=opts.clamp_activation)
-if opts.subspace == "none":
-    pass
-elif opts.subspace == "group":
-    group_criterion = opts.loss(sampler=opts.sample(), margin=opts.group_margin)
-    criterion = loss.GroupingLoss(criterion, group_criterion, n_group=4, ratio=1.0)
-
-print(type(criterion))
+criterion = opts.loss(sampler=opts.sample(), margin=opts.margin)
 
 if opts.optim == "sgd":
-    optimizer = optim.SGD(model.parameters(), lr=opts.lr, momentum=0.9, weight_decay=1e-5)
+    optimizer = optim.SGD([{'params': model.base.parameters(), 'lr': opts.lr*0.1},
+                           {'params': model.linear.parameters(), 'lr': opts.lr*0.1}],
+                          momentum=0.9, weight_decay=1e-5)
 elif opts.optim == "adam":
-    optimizer = optim.Adam(model.parameters(), lr=opts.lr, weight_decay=1e-5)
+    optimizer = optim.Adam([{'params': model.base.parameters(), 'lr': opts.lr*0.1},
+                           {'params': model.linear.parameters(), 'lr': opts.lr*0.1}],
+                           eps=1e-7, weight_decay=1e-5)
 
 lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=opts.lr_decay_epochs, gamma=opts.lr_decay_gamma)
 n_iter = 0
@@ -201,11 +177,7 @@ def train(net, loader, ep, scheduler=None, writer=None):
 
         images, labels = images.cuda(), labels.cuda()
         embedding = net(images)
-
-        if embedding.dim() == 3:
-            loss = sum([criterion(embedding[:, i], labels) for i in range(embedding.size(1))])
-        else:
-            loss = criterion(embedding, labels)
+        loss = criterion(embedding, labels)
         loss_all.append(loss.item())
 
         if writer:
@@ -241,8 +213,11 @@ def eval(net, loader, ep):
 if opts.mode == "eval":
     eval(model, loader_eval, 0)
 else:
-    train_recall = eval(model, loader_train_eval, 0)
-    val_recall = eval(model, loader_eval, 0)
+    # train_recall = eval(model, loader_train_eval, 0)
+    # val_recall = eval(model, loader_eval, 0)
+
+    train_recall = 0
+    val_recall = 0
 
     if writer:
         writer.add_scalar('recall@1/train', train_recall, 0)

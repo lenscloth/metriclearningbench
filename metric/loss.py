@@ -7,11 +7,11 @@ from utils import pdist
 from metric.sampler.pair import RandomNegative, HardNegative, AllPairs
 
 
-__all__ = ['L1Triplet', 'L2Triplet', 'RandomSubSpaceOnlySampleLoss']
+__all__ = ['L1Triplet', 'L2Triplet', 'DistillDistance', 'DistillAngle']
 
 
 class _Triplet(nn.Module):
-    def __init__(self, p=2, margin=0.2, sampler=None, reduce=True, size_average=True, clamp_activation=False):
+    def __init__(self, p=2, margin=0.2, sampler=None, reduce=True, size_average=True):
         super().__init__()
         self.p = p
         self.margin = margin
@@ -20,31 +20,18 @@ class _Triplet(nn.Module):
         self.sampler = sampler
         self.sampler.dist_func = lambda e: pdist(e, squared=(p==2))
 
-        self.clamp_activation = clamp_activation
         self.reduce = reduce
         self.size_average = size_average
 
-    def forward(self, embeddings, labels, weight=None):
+    def forward(self, embeddings, labels):
         anchor_idx, pos_idx, neg_idx = self.sampler(embeddings, labels)
 
         anchor_embed = embeddings[anchor_idx]
         positive_embed = embeddings[pos_idx]
         negative_embed = embeddings[neg_idx]
 
-        if self.clamp_activation:
-            anchor_embed, positive_embed, negative_embed = ClampActivationTopk.apply(anchor_embed,
-                                                                                     positive_embed,
-                                                                                     negative_embed,
-                                                                                     int(embeddings.size(1)/20))
-
         loss = F.triplet_margin_loss(anchor_embed, positive_embed, negative_embed,
                                      margin=self.margin, p=self.p, reduction='none')
-
-        if weight is not None:
-            pos_weight = weight[anchor_idx, pos_idx]
-            neg_weight = weight[anchor_idx, neg_idx]
-            pair_weight = (pos_weight + neg_weight) / 2.0
-            loss = pair_weight * loss
 
         if not self.reduce:
             return loss
@@ -56,13 +43,13 @@ class _Triplet(nn.Module):
 
 
 class L2Triplet(_Triplet):
-    def __init__(self, margin=0.2, sampler=None, clamp_activation=False):
-        super().__init__(p=2, margin=margin, sampler=sampler, clamp_activation=clamp_activation)
+    def __init__(self, margin=0.2, sampler=None):
+        super().__init__(p=2, margin=margin, sampler=sampler)
 
 
 class L1Triplet(_Triplet):
-    def __init__(self, margin=0.2, sampler=None, clamp_activation=False):
-        super().__init__(p=1, margin=margin, sampler=sampler, clamp_activation=clamp_activation)
+    def __init__(self, margin=0.2, sampler=None):
+        super().__init__(p=1, margin=margin, sampler=sampler)
 
 
 class MarginLoss(nn.Module):
@@ -81,8 +68,6 @@ class MarginLoss(nn.Module):
     def forward(self, embeddings, labels):
         anchor_idx, pos_idx, neg_idx = self.sampler(embeddings, labels)
 
-        dist = pdist(embeddings, squared=False)
-
         if self.class_margin is not None:
             beta = self.beta + self.class_margin[labels[anchor_idx]]
             beta_reg_loss = beta.sum() * self.nu
@@ -90,114 +75,16 @@ class MarginLoss(nn.Module):
             beta = self.beta
             beta_reg_loss = 0
 
-        pos_loss = (self.alpha + (dist[anchor_idx, pos_idx] - beta)).clamp(min=0)
-        neg_loss = (self.alpha - (dist[anchor_idx, neg_idx] - beta)).clamp(min=0)
+        anchor_embed = embeddings[anchor_idx]
+        positve_embed = embeddings[pos_idx]
+        negative_embed = embeddings[neg_idx]
 
-        loss = (pos_loss + neg_loss) / (len(anchor_idx) * 2)
-        return loss + beta_reg_loss
+        pos_dist = (anchor_embed-positve_embed).pow(2).sum(dim=1).sqrt()
+        neg_dist = (anchor_embed-negative_embed).pow(2).sum(dim=1).sqrt()
+        pos_loss = (self.alpha + (pos_dist - beta)).clamp(min=0)
+        neg_loss = (self.alpha - (neg_dist - beta)).clamp(min=0)
 
-
-class OnlyNegativeLoss(nn.Module):
-    def __init__(self, p=2, margin=0.2):
-        super().__init__()
-        self.p = p
-        self.margin = margin
-        self.dist_fun = lambda e: pdist(e, squared=p==2)
-
-    def forward(self, embeddings, labels):
-        d = self.dist_fun(embeddings)
-        neg_mask = (labels.unsqueeze(0) == labels.unsqueeze(1))
-        neg_idx = (d * neg_mask.float()).topk(2, dim=1, largest=False)[1][:, 1]
-
-        neg_val = d[range(len(embeddings)), neg_idx]
-        loss = (self.margin - neg_val).clamp(min=0)
-
-        return loss.mean()
-
-
-class ClampActivationMargin(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, anchor, positive, negative, squared, margin):
-        pos_d = (anchor - positive).pow(2)
-        neg_d = (anchor - negative).pow(2)
-
-        if not squared:
-            pos_d = pos_d.sqrt()
-            neg_d = neg_d.sqrt()
-
-        gap = neg_d - pos_d
-        mask = (gap < margin).float()
-        ctx.save_for_backward(mask)
-        return anchor, positive, negative
-
-    @staticmethod
-    def backward(ctx, grad_anc, grad_pos, grad_neg):
-        mask, = ctx.saved_tensors
-
-        return mask * grad_anc, mask * grad_pos, mask * grad_neg, None, None
-
-
-class ClampActivationTopk(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, anchor, positive, negative, k):
-        pos_d = (anchor - positive)
-        neg_d = (anchor - negative)
-
-        gap = neg_d - pos_d
-        mask = torch.zeros_like(gap).scatter_(1, gap.topk(k, dim=1)[1], 1.0)
-        ctx.save_for_backward(mask)
-        return anchor, positive, negative
-
-    @staticmethod
-    def backward(ctx, grad_anc, grad_pos, grad_neg):
-        mask, = ctx.saved_tensors
-
-        return mask * grad_anc, mask * grad_pos, mask * grad_neg, None
-
-
-class AdverserialGradient(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, x):
-        return x
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        return -1 * grad_output
-
-
-class OneHotCategorical(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, log_prob):
-        m = torch.distributions.one_hot_categorical.OneHotCategorical(logits=log_prob)
-        mask = AdverserialGradient.apply(m.sample())
-        return mask
-
-    @staticmethod
-    def backward(ctx, mask_grad):
-        return mask_grad
-
-
-class GroupingLoss(nn.Module):
-    def __init__(self, criterion, group_criterion, n_group=4, ratio=1.0):
-        super().__init__()
-        self.criterion = criterion
-        self.group_criterion = group_criterion
-
-        self.ratio = ratio
-        self.n_group = n_group
-
-    def forward(self, embeddings, labels):
-        entire_loss = self.criterion(embeddings, labels)
-
-        embed_size = embeddings.size(1)
-        m = torch.distributions.one_hot_categorical.OneHotCategorical(probs=torch.ones((embed_size, self.n_group),
-                                                                                       device=embeddings.device))
-        mask = m.sample()
-
-        grouped_embedding = embeddings.unsqueeze(2) * mask.unsqueeze(0)
-        grouped_loss = sum([self.group_criterion(grouped_embedding[..., g], labels) for g in range(self.n_group)])
-        loss = entire_loss + self.ratio * grouped_loss
-
+        loss = (pos_loss.sum() + neg_loss.sum()) / ((pos_loss > 0).sum() + (neg_loss > 0).sum()).data.float()
         return loss
 
 
@@ -296,42 +183,42 @@ class DistillAngle(nn.Module):
 #         return loss
 #
 #
-
-class RandomSubSpaceOnlySampleLoss(nn.Module):
-    def __init__(self, loss_maker, n_group=10):
-        super(RandomSubSpaceOnlySampleLoss, self).__init__()
-        self.loss_maker = loss_maker
-        self.n_group = n_group
-
-    def forward(self, embeddings, labels):
-        embed_size = embeddings.size(1)
-
-        m = torch.distributions.one_hot_categorical.OneHotCategorical(probs=torch.ones((embed_size, self.n_group), device=embeddings.device))
-        mask = m.sample()
-        sampled_embedding = embeddings.unsqueeze(2) * mask.unsqueeze(0)
-
-        a_is, p_is, n_is = [], [], []
-        a_i, p_i, n_i = self.loss_maker.sampler(embeddings, labels)
-        a_is.append(a_i)
-        p_is.append(p_i)
-        n_is.append(n_i)
-
-        for k in range(self.n_group):
-            e = sampled_embedding[..., k]
-            a_i, p_i, n_i = self.loss_maker.sampler(e, labels)
-
-            a_is.append(a_i)
-            p_is.append(p_i)
-            n_is.append(n_i)
-
-        anchor_idx = torch.cat(a_is, dim=0)
-        pos_idx = torch.cat(p_is, dim=0)
-        neg_idx = torch.cat(n_is, dim=0)
-
-        d = self.loss_maker.dist_func(embeddings)
-
-        pos_val = d[anchor_idx, pos_idx]
-        neg_val = d[anchor_idx, neg_idx]
-
-        loss = (pos_val - neg_val + self.loss_maker.margin).clamp(min=0)
-        return loss.mean()
+#
+# class RandomSubSpaceOnlySampleLoss(nn.Module):
+#     def __init__(self, loss_maker, n_group=10):
+#         super(RandomSubSpaceOnlySampleLoss, self).__init__()
+#         self.loss_maker = loss_maker
+#         self.n_group = n_group
+#
+#     def forward(self, embeddings, labels):
+#         embed_size = embeddings.size(1)
+#
+#         m = torch.distributions.one_hot_categorical.OneHotCategorical(probs=torch.ones((embed_size, self.n_group), device=embeddings.device))
+#         mask = m.sample()
+#         sampled_embedding = embeddings.unsqueeze(2) * mask.unsqueeze(0)
+#
+#         a_is, p_is, n_is = [], [], []
+#         a_i, p_i, n_i = self.loss_maker.sampler(embeddings, labels)
+#         a_is.append(a_i)
+#         p_is.append(p_i)
+#         n_is.append(n_i)
+#
+#         for k in range(self.n_group):
+#             e = sampled_embedding[..., k]
+#             a_i, p_i, n_i = self.loss_maker.sampler(e, labels)
+#
+#             a_is.append(a_i)
+#             p_is.append(p_i)
+#             n_is.append(n_i)
+#
+#         anchor_idx = torch.cat(a_is, dim=0)
+#         pos_idx = torch.cat(p_is, dim=0)
+#         neg_idx = torch.cat(n_is, dim=0)
+#
+#         d = self.loss_maker.dist_func(embeddings)
+#
+#         pos_val = d[anchor_idx, pos_idx]
+#         neg_val = d[anchor_idx, neg_idx]
+#
+#         loss = (pos_val - neg_val + self.loss_maker.margin).clamp(min=0)
+#         return loss.mean()
