@@ -119,6 +119,9 @@ class SemiHardNegative(_Sampler):
 class DistanceWeighted(_Sampler):
     cut_off = 0.5
     nonzero_loss_cutoff = 1.4
+    """
+    Distance Weighted loss assume that embeddings are normalized py 2-norm.
+    """
 
     def forward(self, embeddings, labels):
         with torch.no_grad():
@@ -133,19 +136,11 @@ class DistanceWeighted(_Sampler):
 
             log_weight = ((2.0 - d) * dist.log() - ((d - 3.0)/2.0) * (1.0 - 0.25 * (dist * dist)).log())
             weight = (log_weight - log_weight.max(dim=1, keepdim=True)[0]).exp()
-            weight = ((dist < self.nonzero_loss_cutoff) * neg_mask).float() * weight
+            weight = weight * (neg_mask * (dist < self.nonzero_loss_cutoff)).float()
 
-            """
-            When all the negative pair's distance are larger than nonzero_loss_cutoff,
-            We sample randomly among negative pairs
-            """
-            neg_dist = neg_mask.float() * dist
-            in_range_neg_dist = (neg_dist < self.nonzero_loss_cutoff)
-            weight = weight + ((in_range_neg_dist.sum(dim=1, keepdim=True) == 0) * neg_mask).float()
+            weight = weight + ((weight.sum(dim=1, keepdim=True) == 0) * neg_mask).float()
             weight = weight / (weight.sum(dim=1, keepdim=True))
             weight = weight[anchor_idx]
             neg_idx = torch.multinomial(weight, 1).squeeze(1)
 
         return anchor_idx, pos_idx, neg_idx
-
-

@@ -33,15 +33,16 @@ parser.add_argument('--load',
 parser.add_argument('--dataset',
                     choices=dict(cub2011=dataset.CUB2011MetricLearning,
                                  cars196=dataset.Cars196MetricLearning,
-                                 stanford_online_products=dataset.StanfordOnlineProducts),
+                                 stanford=dataset.StanfordOnlineProducts),
                     default=dataset.CUB2011MetricLearning,
                     action=LookupChoices)
 
 parser.add_argument('--base',
-                    choices=dict(inception_v1=backbone.InceptionV1,
+                    choices=dict(googlenet=backbone.GoogleNet,
                                  inception_v1bn=backbone.InceptionV1BN,
                                  resnet18=backbone.ResNet18,
                                  resnet50=backbone.ResNet50,
+                                 resnet50_v2=backbone.ResNet50_v2,
                                  vgg16=backbone.VGG16,
                                  vgg16bn=backbone.VGG16BN,
                                  vgg19bn=backbone.VGG19BN),
@@ -59,18 +60,18 @@ parser.add_argument('--sample',
 
 parser.add_argument('--loss',
                     choices=dict(l1_triplet=loss.L1Triplet,
-                                 l2_triplet=loss.L2Triplet),
+                                 l2_triplet=loss.L2Triplet,
+                                 contrastive=loss.ContrastiveLoss),
                     default=loss.L2Triplet,
                     action=LookupChoices)
-
 
 parser.add_argument('--margin', type=float, default=0.2)
 parser.add_argument('--no_normalize', default=False, action='store_true')
 parser.add_argument('--no_pretrained', default=False, action='store_true')
 
-parser.add_argument('--lr', default=1e-4, type=float)
-parser.add_argument('--lr_decay_epochs', type=int, default=[20, 40], nargs='+')
-parser.add_argument('--lr_decay_gamma', default=0.1)
+parser.add_argument('--lr', default=1e-5, type=float)
+parser.add_argument('--lr_decay_epochs', type=int, default=[40, 45, 50, 55], nargs='+')
+parser.add_argument('--lr_decay_gamma', default=0.5)
 parser.add_argument('--seed', default=random.randint(1, 1000), type=int)
 parser.add_argument('--epochs', default=60, type=int)
 parser.add_argument('--batch', default=128, type=int)
@@ -98,11 +99,13 @@ for set_random_seed in [random.seed, torch.manual_seed, torch.cuda.manual_seed_a
     set_random_seed(opts.seed)
 
 base_model = opts.base(pretrained=not opts.no_pretrained)
-if isinstance(base_model, backbone.InceptionV1BN) or isinstance(base_model, backbone.InceptionV1):
+if isinstance(base_model, backbone.InceptionV1BN) or isinstance(base_model, backbone.GoogleNet):
     normalize = transforms.Compose([
         transforms.Lambda(lambda x: x[[2, 1, 0], ...] * 255.0),
         transforms.Normalize(mean=[104, 117, 128], std=[1, 1, 1]),
     ])
+elif isinstance(base_model, backbone.ResNet50_v2):
+    normalize= transforms.Lambda(lambda x: x * 255.0)
 else:
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
@@ -152,13 +155,10 @@ if opts.load is not None:
 criterion = opts.loss(sampler=opts.sample(), margin=opts.margin)
 
 if opts.optim == "sgd":
-    optimizer = optim.SGD([{'params': model.base.parameters(), 'lr': opts.lr*0.1},
-                           {'params': model.linear.parameters(), 'lr': opts.lr*0.1}],
-                          momentum=0.9, weight_decay=1e-5)
+    optimizer = optim.SGD(model.parameters(), lr=opts.lr, momentum=0.9, weight_decay=1e-5)
 elif opts.optim == "adam":
-    optimizer = optim.Adam([{'params': model.base.parameters(), 'lr': opts.lr*0.1},
-                           {'params': model.linear.parameters(), 'lr': opts.lr*0.1}],
-                           eps=1e-7, weight_decay=1e-5)
+    optimizer = optim.Adam([{'params': model.base.parameters(), 'lr':opts.lr},
+                            {'params': model.linear.parameters(), 'lr':opts.lr}], weight_decay=1e-5)
 
 lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=opts.lr_decay_epochs, gamma=opts.lr_decay_gamma)
 n_iter = 0
@@ -215,7 +215,6 @@ if opts.mode == "eval":
 else:
     # train_recall = eval(model, loader_train_eval, 0)
     # val_recall = eval(model, loader_eval, 0)
-
     train_recall = 0
     val_recall = 0
 

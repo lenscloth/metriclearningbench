@@ -10,7 +10,7 @@ import torch
 import torch.optim as optim
 import torchvision.transforms as transforms
 import torch.nn.functional as F
-import metric.loss as loss
+from metric.loss import HardDarkRank, DistillDistance, DistillAngle, L1Triplet, L2Triplet
 import metric.sampler.pair as pair
 
 from tqdm import tqdm
@@ -26,15 +26,16 @@ LookupChoices = type('', (argparse.Action, ), dict(__call__=lambda a, p, n, v, o
 parser.add_argument('--dataset',
                     choices=dict(cub2011=dataset.CUB2011MetricLearning,
                                  cars196=dataset.Cars196MetricLearning,
-                                 stanford_online_products=dataset.StanfordOnlineProducts),
+                                 stanford=dataset.StanfordOnlineProducts),
                     default=dataset.CUB2011MetricLearning,
                     action=LookupChoices)
 
 parser.add_argument('--base',
-                    choices=dict(inception_v1=backbone.InceptionV1,
+                    choices=dict(inception_v1=backbone.GoogleNet,
                                  inception_v1bn=backbone.InceptionV1BN,
                                  resnet18=backbone.ResNet18,
                                  resnet50=backbone.ResNet50,
+                                 resnet50_v2=backbone.ResNet50_v2,
                                  vgg16=backbone.VGG16,
                                  vgg16bn=backbone.VGG16BN,
                                  vgg19bn=backbone.VGG19BN),
@@ -42,10 +43,11 @@ parser.add_argument('--base',
                     action=LookupChoices)
 
 parser.add_argument('--base_teacher',
-                    choices=dict(inception_v1=backbone.InceptionV1,
+                    choices=dict(inception_v1=backbone.GoogleNet,
                                  inception_v1bn=backbone.InceptionV1BN,
                                  resnet18=backbone.ResNet18,
                                  resnet50=backbone.ResNet50,
+                                 resnet50_v2=backbone.ResNet50_v2,
                                  vgg16=backbone.VGG16,
                                  vgg16bn=backbone.VGG16BN,
                                  vgg19bn=backbone.VGG19BN),
@@ -62,18 +64,15 @@ parser.add_argument('--sample',
                     default=pair.AllPairs,
                     action=LookupChoices)
 
-parser.add_argument('--loss',
-                    choices=dict(distance=loss.DistillDistance,
-                                 darkrank=loss.HardDarkRank),
-                    default=loss.DistillDistance,
-                    action=LookupChoices)
-
+parser.add_argument('--triplet_ratio', default=0, type=float)
+parser.add_argument('--dist_ratio', default=0, type=float)
 parser.add_argument('--angle_ratio', default=0, type=float)
+parser.add_argument('--dark_ratio', default=0, type=float)
 
 parser.add_argument('--aux_loss',
-                    choices=dict(l1_triplet=loss.L1Triplet,
-                                 l2_triplet=loss.L2Triplet),
-                    default=None,
+                    choices=dict(l1_triplet=L1Triplet,
+                                 l2_triplet=L2Triplet),
+                    default=L2Triplet,
                     action=LookupChoices)
 
 parser.add_argument('--aux_sample',
@@ -84,8 +83,7 @@ parser.add_argument('--aux_sample',
                                  distance=pair.DistanceWeighted),
                     default=pair.AllPairs,
                     action=LookupChoices)
-
-parser.add_argument('--margin', type=float, default=0.2)
+parser.add_argument('--aux_margin', type=float, default=0.2)
 parser.add_argument('--no_normalize', default=False, action='store_true')
 
 parser.add_argument('--lr', default=1e-4, type=float)
@@ -93,7 +91,6 @@ parser.add_argument('--data', default='data')
 parser.add_argument('--epochs', default=80, type=int)
 parser.add_argument('--batch', default=128, type=int)
 
-parser.add_argument('--alpha', default=1, type=int)
 parser.add_argument('--embedding_size', default=128, type=int)
 parser.add_argument('--teacher_embedding_size', default=128, type=int)
 
@@ -104,7 +101,7 @@ opts = parser.parse_args()
 base_model = opts.base(pretrained=True)
 teacher_base = opts.base_teacher(pretrained=False)
 
-if isinstance(base_model, backbone.InceptionV1BN) or isinstance(base_model, backbone.InceptionV1):
+if isinstance(base_model, backbone.InceptionV1BN) or isinstance(base_model, backbone.GoogleNet):
     normalize = transforms.Compose([
         transforms.Lambda(lambda x: x[[2, 1, 0], ...] * 255.0),
         transforms.Normalize(mean=[104, 117, 128], std=[1, 1, 1]),
@@ -167,13 +164,11 @@ model = model.cuda()
 
 optimizer = optim.Adam(model.parameters(), lr=opts.lr, weight_decay=1e-5)
 lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[40, 60], gamma=0.1)
-dist_criterion = opts.loss()
-angle_criterion = loss.DistillAngle(n_anchor=opts.batch)
 
-if opts.aux_loss is not None:
-    aux_criterion = opts.aux_loss(sampler=opts.aux_sample(), margin=opts.margin)
-else:
-    aux_criterion = None
+dist_criterion = DistillDistance()
+angle_criterion = DistillAngle(n_anchor=opts.batch)
+dark_criterion = HardDarkRank()
+triplet_criterion = opts.aux_loss(sampler=opts.aux_sample(), margin=opts.aux_margin)
 
 
 def train(net, loader, ep, scheduler=None):
@@ -181,9 +176,12 @@ def train(net, loader, ep, scheduler=None):
         scheduler.step()
     net.train()
     teacher.eval()
-    loss_all = []
+
     dist_loss_all = []
     angle_loss_all = []
+    dark_loss_all = []
+    triplet_loss_all = []
+    loss_all = []
 
     train_iter = tqdm(loader)
     for images, labels in train_iter:
@@ -193,22 +191,28 @@ def train(net, loader, ep, scheduler=None):
         with torch.no_grad():
             t_e = teacher(images)
 
-        dist_loss = dist_criterion(e, t_e)
+        triplet_loss = opts.triplet_ratio * triplet_criterion(e, labels)
+        dist_loss = opts.dist_ratio * dist_criterion(e, t_e)
         angle_loss = opts.angle_ratio * angle_criterion(e, t_e)
-        loss = dist_loss + angle_loss
+        dark_loss = opts.dark_ratio * dark_criterion(e, t_e)
 
-        if aux_criterion is not None:
-            loss += aux_criterion(e, labels)
+        loss = triplet_loss + dist_loss + angle_loss + dark_loss
 
+        triplet_loss_all.append(triplet_loss.item())
         dist_loss_all.append(dist_loss.item())
         angle_loss_all.append(angle_loss.item())
+        dark_loss_all.append(dark_loss.item())
         loss_all.append(loss.item())
+
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        train_iter.set_description("[Train][Epoch %d] Dist: %.5f, Angle: %.5f" % (ep, dist_loss.item(), angle_loss.item()))
-    print('[Epoch %d] Loss: %.5f, Dist: %.5f, Angle: %.5f \n' %\
-          (ep, torch.Tensor(loss_all).mean(), torch.Tensor(dist_loss_all).mean(), torch.Tensor(angle_loss_all).mean()))
+
+        train_iter.set_description("[Train][Epoch %d] Triplet: %.5f, Dist: %.5f, Angle: %.5f, Dark: %5f" %
+                                   (ep, triplet_loss.item(), dist_loss.item(), angle_loss.item(), dark_loss.item()))
+    print('[Epoch %d] Loss: %.5f, Triplet: %.5f, Dist: %.5f, Angle: %.5f, Dark: %.5f \n' %\
+          (ep, torch.Tensor(loss_all).mean(), torch.Tensor(triplet_loss_all).mean(),
+           torch.Tensor(dist_loss_all).mean(), torch.Tensor(angle_loss_all).mean(), torch.Tensor(dark_loss_all).mean()))
 
 
 def eval(net, loader, ep):

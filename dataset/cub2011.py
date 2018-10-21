@@ -5,7 +5,7 @@ from torchvision.datasets import ImageFolder
 from torchvision.datasets.utils import download_url, check_integrity
 
 
-__all__ = ['CUB2011', 'CUB2011MetricLearning']
+__all__ = ['CUB2011MetricLearning']
 
 
 class CUB2011(ImageFolder):
@@ -14,7 +14,7 @@ class CUB2011(ImageFolder):
     filename = 'CUB_200_2011.tgz'
     tgz_md5 = '97eceeb196236b17998738112f37df78'
 
-    data_list = [
+    checklist = [
         ['001.Black_footed_Albatross/Black_Footed_Albatross_0001_796111.jpg', '4c84da568f89519f84640c54b7fba7c2'],
         ['002.Laysan_Albatross/Laysan_Albatross_0001_545.jpg', 'e7db63424d0e384dba02aacaf298cdc0'],
         ['198.Rock_Wren/Rock_Wren_0001_189289.jpg', '487d082f1fbd58faa7b08aa5ede3cc00'],
@@ -22,24 +22,32 @@ class CUB2011(ImageFolder):
     ]
 
     def __init__(self, root, transform=None, target_transform=None, download=False):
+        self.root = root
         if download:
             download_url(self.url, root, self.filename, self.tgz_md5)
 
-        for f, md5 in self.data_list:
-            if check_integrity(os.path.join(root, self.base_folder, f), md5):
-                continue
-            else:
+            if not self._check_integrity():
                 cwd = os.getcwd()
                 tar = tarfile.open(os.path.join(root, self.filename), "r:gz")
                 os.chdir(root)
                 tar.extractall()
                 tar.close()
                 os.chdir(cwd)
-                break
+
+        if not self._check_integrity():
+            raise RuntimeError('Dataset not found or corrupted.' +
+                               ' You can use download=True to download it')
 
         super(CUB2011, self).__init__(os.path.join(root, self.base_folder),
                                       transform=transform,
                                       target_transform=target_transform)
+
+    def _check_integrity(self):
+        for f, md5 in self.checklist:
+            fpath = os.path.join(self.root, self.base_folder, f)
+            if not check_integrity(fpath, md5):
+                return False
+        return True
 
 
 class CUB2011MetricLearning(CUB2011):

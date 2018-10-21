@@ -52,6 +52,26 @@ class L1Triplet(_Triplet):
         super().__init__(p=1, margin=margin, sampler=sampler)
 
 
+class ContrastiveLoss(nn.Module):
+    def __init__(self, margin=0.2, sampler=None):
+        super().__init__()
+        self.margin = margin
+        self.sampler = sampler
+
+    def forward(self, embeddings, labels):
+        anchor_idx, pos_idx, neg_idx = self.sampler(embeddings, labels)
+
+        anchor_embed = embeddings[anchor_idx]
+        positive_embed = embeddings[pos_idx]
+        negative_embed = embeddings[neg_idx]
+
+        pos_loss = (F.pairwise_distance(anchor_embed, positive_embed, p=2)).pow(2)
+        neg_loss = (self.margin - F.pairwise_distance(anchor_embed, negative_embed, p=2)).clamp(min=0).pow(2)
+
+        loss = torch.cat((pos_loss, neg_loss))
+        return loss.mean()
+
+
 class MarginLoss(nn.Module):
     def __init__(self, alpha=0.2, beta=1.2, beta_classes=None, nu=0, sampler=None):
         super().__init__()
@@ -89,7 +109,7 @@ class MarginLoss(nn.Module):
 
 
 class HardDarkRank(nn.Module):
-    def __init__(self, alpha=2, beta=2, permute_len=8):
+    def __init__(self, alpha=3, beta=3, permute_len=4):
         super().__init__()
         self.alpha = alpha
         self.beta = beta

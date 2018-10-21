@@ -31,7 +31,7 @@ parser.add_argument('--dataset',
                     action=LookupChoices)
 
 parser.add_argument('--base',
-                    choices=dict(inception_v1=backbone.InceptionV1,
+                    choices=dict(inception_v1=backbone.GoogleNet,
                                  inception_v1bn=backbone.InceptionV1BN,
                                  resnet18=backbone.ResNet18,
                                  resnet50=backbone.ResNet50,
@@ -42,7 +42,7 @@ parser.add_argument('--base',
                     action=LookupChoices)
 
 parser.add_argument('--base_teacher',
-                    choices=dict(inception_v1=backbone.InceptionV1,
+                    choices=dict(inception_v1=backbone.GoogleNet,
                                  inception_v1bn=backbone.InceptionV1BN,
                                  resnet18=backbone.ResNet18,
                                  resnet50=backbone.ResNet50,
@@ -89,7 +89,7 @@ opts = parser.parse_args()
 base_model = opts.base(pretrained=True)
 teacher_base = opts.base_teacher(pretrained=False)
 
-if isinstance(base_model, backbone.InceptionV1BN) or isinstance(base_model, backbone.InceptionV1):
+if isinstance(base_model, backbone.InceptionV1BN) or isinstance(base_model, backbone.GoogleNet):
     normalize = transforms.Compose([
         transforms.Lambda(lambda x: x[[2, 1, 0], ...] * 255.0),
         transforms.Normalize(mean=[104, 117, 128], std=[1, 1, 1]),

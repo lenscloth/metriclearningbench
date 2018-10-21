@@ -3,10 +3,10 @@ import torch
 import torch.nn as nn
 import h5py
 
-__all__ = ["InceptionV1"]
+__all__ = ["GoogleNet"]
 
 
-class InceptionV1(nn.Sequential):
+class GoogleNet(nn.Sequential):
     output_size = 1024
     input_side = 227
     rescale = 255.0
@@ -15,7 +15,7 @@ class InceptionV1(nn.Sequential):
     url = "https://github.com/vadimkantorov/metriclearningbench/releases/download/data/googlenet.h5"
 
     def __init__(self, pretrained=True, weight_path='./data/googlenet.h5'):
-        super(InceptionV1, self).__init__(OrderedDict([
+        super(GoogleNet, self).__init__(OrderedDict([
             ('conv1', nn.Sequential(OrderedDict([
                 ('7x7_s2', nn.Conv2d(3, 64, (7, 7), (2, 2), (3, 3))),
                 ('relu1', nn.ReLU(True)),
