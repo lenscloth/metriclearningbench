@@ -10,7 +10,7 @@ import torch
 import torch.optim as optim
 import torchvision.transforms as transforms
 import torch.nn.functional as F
-from metric.loss import HardDarkRank, DistillDistance, DistillAngle, L1Triplet, L2Triplet
+from metric.loss import HardDarkRank, DistillDistance, DistillRelativeDistance, DistillRelativeDistanceV2, DistillAngle, L1Triplet, L2Triplet
 import metric.sampler.pair as pair
 
 from tqdm import tqdm
@@ -24,7 +24,7 @@ parser = argparse.ArgumentParser()
 LookupChoices = type('', (argparse.Action, ), dict(__call__=lambda a, p, n, v, o: setattr(n, a.dest, a.choices[v])))
 
 parser.add_argument('--dataset',
-                    choices=dict(cub2011=dataset.CUB2011MetricLearning,
+                    choices=dict(cub200=dataset.CUB2011MetricLearning,
                                  cars196=dataset.Cars196MetricLearning,
                                  stanford=dataset.StanfordOnlineProducts),
                     default=dataset.CUB2011MetricLearning,
@@ -54,16 +54,6 @@ parser.add_argument('--base_teacher',
                     default=backbone.ResNet50,
                     action=LookupChoices)
 
-
-parser.add_argument('--sample',
-                    choices=dict(random=pair.RandomNegative,
-                                 hard=pair.HardNegative,
-                                 all=pair.AllPairs,
-                                 semihard=pair.SemiHardNegative,
-                                 distance=pair.DistanceWeighted),
-                    default=pair.AllPairs,
-                    action=LookupChoices)
-
 parser.add_argument('--triplet_ratio', default=0, type=float)
 parser.add_argument('--dist_ratio', default=0, type=float)
 parser.add_argument('--angle_ratio', default=0, type=float)
@@ -85,12 +75,15 @@ parser.add_argument('--aux_sample',
                     action=LookupChoices)
 parser.add_argument('--aux_margin', type=float, default=0.2)
 parser.add_argument('--no_normalize', default=False, action='store_true')
+parser.add_argument('--teacher_no_normalize', default=False, action='store_true')
 
 parser.add_argument('--lr', default=1e-4, type=float)
 parser.add_argument('--data', default='data')
 parser.add_argument('--epochs', default=80, type=int)
 parser.add_argument('--batch', default=128, type=int)
-
+parser.add_argument('--iter_per_epoch', default=100, type=int)
+parser.add_argument('--lr_decay_epochs', type=int, default=[40, 60], nargs='+')
+parser.add_argument('--lr_decay_gamma', type=float, default=0.1)
 parser.add_argument('--embedding_size', default=128, type=int)
 parser.add_argument('--teacher_embedding_size', default=128, type=int)
 
@@ -139,7 +132,7 @@ print(len(dataset_eval))
 loader_train_sample = DataLoader(dataset_train, batch_sampler=NPairs(dataset_train,
                                                                      opts.batch,
                                                                      m=5,
-                                                                     iter_per_epoch=100),
+                                                                     iter_per_epoch=opts.iter_per_epoch),
                                  pin_memory=True, num_workers=8)
 loader_train_eval = DataLoader(dataset_train_eval, shuffle=False, batch_size=opts.batch, drop_last=False,
                                pin_memory=False, num_workers=8)
@@ -154,19 +147,18 @@ model = LinearEmbedding(base_model,
 teacher = LinearEmbedding(teacher_base,
                           output_size=teacher_base.output_size,
                           embedding_size=opts.teacher_embedding_size,
-                          normalize=True)
+                          normalize=not opts.teacher_no_normalize)
 
 teacher.load_state_dict(torch.load(opts.teacher_load))
 
 teacher = teacher.cuda()
 model = model.cuda()
 
-
 optimizer = optim.Adam(model.parameters(), lr=opts.lr, weight_decay=1e-5)
-lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[40, 60], gamma=0.1)
+lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=opts.lr_decay_epochs, gamma=opts.lr_decay_gamma)
 
-dist_criterion = DistillDistance()
-angle_criterion = DistillAngle(n_anchor=opts.batch)
+dist_criterion = DistillRelativeDistanceV2() #DistillDistance()
+angle_criterion = DistillAngle()
 dark_criterion = HardDarkRank()
 triplet_criterion = opts.aux_loss(sampler=opts.aux_sample(), margin=opts.aux_margin)
 
@@ -195,7 +187,6 @@ def train(net, loader, ep, scheduler=None):
         dist_loss = opts.dist_ratio * dist_criterion(e, t_e)
         angle_loss = opts.angle_ratio * angle_criterion(e, t_e)
         dark_loss = opts.dark_ratio * dark_criterion(e, t_e)
-
         loss = triplet_loss + dist_loss + angle_loss + dark_loss
 
         triplet_loss_all.append(triplet_loss.item())
@@ -230,13 +221,15 @@ def eval(net, loader, ep):
 
         embeddings_all = torch.cat(embeddings_all).cpu()
         labels_all = torch.cat(labels_all).cpu()
-        rec = recall(embeddings_all, labels_all)
-        print('[Epoch %d] Recall@1: [%.6f]\n' % (ep, rec))
+        rec = recall(embeddings_all, labels_all, K=4)
 
-    return rec
+        for k, r in enumerate(rec):
+            print('[Epoch %d] Recall@%d: [%.4f]\n' % (ep, k+1, 100 * r))
+
+    return rec[0]
 
 
-def init_linear_weight(net, linear, loader):
+def mean_norm(net, loader):
     net.eval()
 
     with torch.no_grad():
@@ -248,13 +241,17 @@ def init_linear_weight(net, linear, loader):
             norms.append(norm)
         mean_norm = sum(norms) / float(len(norms))
     print("Mean Norm : %f" % mean_norm)
-    linear.weight.data = linear.weight.data / mean_norm
-    linear.bias.data = linear.bias.data / mean_norm
+    return mean_norm
 
 
-if opts.no_normalize and isinstance(model, LinearEmbedding):
-    print("Initializing Linear weight...")
-    init_linear_weight(model, model.linear, loader_train_eval)
+# if opts.no_normalize and isinstance(model, LinearEmbedding):
+#     print("Initializing Linear weight...")
+#     mean_teacher = mean_norm(teacher, loader_train_eval)
+#     mean_student = mean_norm(model, loader_train_eval)
+#
+#     model.linear.weight.data = model.linear.weight.data / (mean_student / mean_teacher)
+#     model.linear.bias.data = model.linear.bias.data / (mean_student / mean_teacher)
+
 
 eval(teacher, loader_train_eval, 0)
 eval(teacher, loader_eval, 0)

@@ -323,8 +323,8 @@ class ResNet50_v2(nn.Module):
         relu1           = F.relu(bn1)
         pool1           = F.avg_pool2d(input = relu1, kernel_size = relu1.size()[2:])
         flatten0        = pool1.view(pool1.size(0), -1)
-        fc1             = self.fc1(flatten0)
-        softmax         = F.softmax(fc1)
+        #fc1             = self.fc1(flatten0)
+        #softmax         = F.softmax(fc1)
         return flatten0
 
 

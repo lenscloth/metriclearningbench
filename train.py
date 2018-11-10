@@ -31,7 +31,7 @@ parser.add_argument('--load',
                     default=None)
 
 parser.add_argument('--dataset',
-                    choices=dict(cub2011=dataset.CUB2011MetricLearning,
+                    choices=dict(cub200=dataset.CUB2011MetricLearning,
                                  cars196=dataset.Cars196MetricLearning,
                                  stanford=dataset.StanfordOnlineProducts),
                     default=dataset.CUB2011MetricLearning,
@@ -70,10 +70,10 @@ parser.add_argument('--no_normalize', default=False, action='store_true')
 parser.add_argument('--no_pretrained', default=False, action='store_true')
 
 parser.add_argument('--lr', default=1e-5, type=float)
-parser.add_argument('--lr_decay_epochs', type=int, default=[40, 45, 50, 55], nargs='+')
-parser.add_argument('--lr_decay_gamma', default=0.5)
+parser.add_argument('--lr_decay_epochs', type=int, default=[25, 30, 35], nargs='+')
+parser.add_argument('--lr_decay_gamma', default=0.5, type=float)
 parser.add_argument('--seed', default=random.randint(1, 1000), type=int)
-parser.add_argument('--epochs', default=60, type=int)
+parser.add_argument('--epochs', default=40, type=int)
 parser.add_argument('--batch', default=128, type=int)
 parser.add_argument('--num_image_per_class', default=5, type=int)
 parser.add_argument('--optim', default="adam", choices=["adam", "sgd"])
@@ -84,7 +84,7 @@ parser.add_argument('--save_dir', default=None)
 parser.add_argument('--tensorboard', type=str, default=None)
 
 parser.add_argument('--num_workers', type=int, default=16)
-parser.add_argument('--iter_per_epoch', type=int, default=100)
+parser.add_argument('--iter_per_epoch', type=int, default=250)
 
 opts = parser.parse_args()
 
@@ -95,8 +95,8 @@ else:
     writer = None
 
 
-for set_random_seed in [random.seed, torch.manual_seed, torch.cuda.manual_seed_all]:
-    set_random_seed(opts.seed)
+# for set_random_seed in [random.seed, torch.manual_seed, torch.cuda.manual_seed_all]:
+#     set_random_seed(opts.seed)
 
 base_model = opts.base(pretrained=not opts.no_pretrained)
 if isinstance(base_model, backbone.InceptionV1BN) or isinstance(base_model, backbone.GoogleNet):
@@ -105,7 +105,7 @@ if isinstance(base_model, backbone.InceptionV1BN) or isinstance(base_model, back
         transforms.Normalize(mean=[104, 117, 128], std=[1, 1, 1]),
     ])
 elif isinstance(base_model, backbone.ResNet50_v2):
-    normalize= transforms.Lambda(lambda x: x * 255.0)
+    normalize = transforms.Lambda(lambda x: x * 255.0)
 else:
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
@@ -138,9 +138,9 @@ loader_train_sample = DataLoader(dataset_train, batch_sampler=NPairs(dataset_tra
                                                                      m=opts.num_image_per_class,
                                                                      iter_per_epoch=opts.iter_per_epoch),
                                  pin_memory=True, num_workers=opts.num_workers)
-loader_train_eval = DataLoader(dataset_train_eval, shuffle=True, batch_size=opts.batch, drop_last=False,
+loader_train_eval = DataLoader(dataset_train_eval, shuffle=False, batch_size=opts.batch, drop_last=False,
                                pin_memory=False, num_workers=opts.num_workers)
-loader_eval = DataLoader(dataset_eval, shuffle=True, batch_size=opts.batch, drop_last=False,
+loader_eval = DataLoader(dataset_eval, shuffle=False, batch_size=opts.batch, drop_last=False,
                          pin_memory=True, num_workers=opts.num_workers)
 
 model = LinearEmbedding(base_model,
@@ -205,9 +205,15 @@ def eval(net, loader, ep):
 
         embeddings_all = torch.cat(embeddings_all).cpu()
         labels_all = torch.cat(labels_all).cpu()
-        rec = recall(embeddings_all, labels_all)
-        print('[Epoch %d] Recall@1: [%.4f]\n' % (ep, 100 * rec))
-    return rec
+        rec = recall(embeddings_all, labels_all, K=4)
+
+        print("Embedding Size: %d" % len(embeddings_all))
+        print(labels_all.sum())
+
+        for k, r in enumerate(rec):
+            print('[Epoch %d] Recall@%d: [%.4f]\n' % (ep, k+1, 100 * r))
+
+    return rec[0]
 
 
 if opts.mode == "eval":

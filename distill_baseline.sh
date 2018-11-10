@@ -1,3 +1,0 @@
-#!/usr/bin/env bash
-python train_distill.py --no_normalize --embedding_type multi --base resnet18 --base_teacher resnet50 --embedding_size 64 --teacher_embedding_size 512 --teacher_load resnet50_512_sgd/best.pth --save_dir ../metric_result/2018.10.13/resnet18_64_multi_try1 > ../metric_result/2018.10.13/resnet18_64_multi_try1.txt
-python train_distill.py --no_normalize --embedding_type multi --base resnet18 --base_teacher resnet50 --embedding_size 64 --teacher_embedding_size 512 --teacher_load resnet50_512_sgd/best.pth --save_dir ../metric_result/2018.10.13/resnet18_64_multi_try2 > ../metric_result/2018.10.13/resnet18_64_multi_try2.txt
