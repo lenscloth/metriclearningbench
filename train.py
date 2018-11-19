@@ -148,6 +148,7 @@ model = LinearEmbedding(base_model,
                         embedding_size=opts.embedding_size,
                         normalize=not opts.no_normalize).cuda()
 
+
 if opts.load is not None:
     model.load_state_dict(torch.load(opts.load))
     print("Loaded Model from %s" % opts.load)
@@ -191,6 +192,7 @@ def train(net, loader, ep, scheduler=None, writer=None):
 
 
 def eval(net, loader, ep):
+    K = [1, 10, 100, 1000]
     net.eval()
     test_iter = tqdm(loader)
     embeddings_all, labels_all = [], []
@@ -205,12 +207,12 @@ def eval(net, loader, ep):
 
         embeddings_all = torch.cat(embeddings_all).cpu()
         labels_all = torch.cat(labels_all).cpu()
-        rec = recall(embeddings_all, labels_all, K=4)
+        rec = recall(embeddings_all, labels_all, K=K)
 
         print("Embedding Size: %d" % len(embeddings_all))
         print(labels_all.sum())
 
-        for k, r in enumerate(rec):
+        for k, r in zip(K, rec):
             print('[Epoch %d] Recall@%d: [%.4f]\n' % (ep, k+1, 100 * r))
 
     return rec[0]

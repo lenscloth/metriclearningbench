@@ -5,12 +5,13 @@ from .distance import pdist
 __all__ = ['recall']
 
 
-def recall(embeddings, labels, K=1):
+def recall(embeddings, labels, K=[]):
     """
     Multiply by 10 for numerical stability.
     """
     D = pdist(embeddings * 10, squared=True)
-    knn_inds = D.topk(1 + K, dim=1, largest=False)[1][:, 1:]
+
+    knn_inds = D.topk(1 + max(K), dim=1, largest=False)[1][:, 1:]
 
     """
     Check if, knn_inds contain index of query image.
@@ -21,7 +22,8 @@ def recall(embeddings, labels, K=1):
     correct_labels = labels.unsqueeze(1) == selected_labels
 
     recall_k = []
-    for k in range(1, K+1):
+
+    for k in K:
         correct_k = (correct_labels[:, :k].sum(dim=1) > 0).float().mean().item()
         recall_k.append(correct_k)
     return recall_k

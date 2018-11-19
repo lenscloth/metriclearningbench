@@ -9,7 +9,8 @@ __all__ = ['CUB2011MetricLearning']
 
 
 class CUB2011(ImageFolder):
-    base_folder = 'CUB_200_2011/images'
+    image_folder = 'CUB_200_2011/images'
+    base_folder = 'CUB_200_2011/'
     url = 'http://www.vision.caltech.edu/visipedia-data/CUB-200-2011/CUB_200_2011.tgz'
     filename = 'CUB_200_2011.tgz'
     tgz_md5 = '97eceeb196236b17998738112f37df78'
@@ -38,16 +39,38 @@ class CUB2011(ImageFolder):
             raise RuntimeError('Dataset not found or corrupted.' +
                                ' You can use download=True to download it')
 
-        super(CUB2011, self).__init__(os.path.join(root, self.base_folder),
+        super(CUB2011, self).__init__(os.path.join(root, self.image_folder),
                                       transform=transform,
                                       target_transform=target_transform)
 
     def _check_integrity(self):
         for f, md5 in self.checklist:
-            fpath = os.path.join(self.root, self.base_folder, f)
+            fpath = os.path.join(self.root, self.image_folder, f)
             if not check_integrity(fpath, md5):
                 return False
         return True
+
+
+class CUB2011Classification(CUB2011):
+    def __init__(self, root, train=False, transform=None, target_transform=None, download=False):
+        CUB2011.__init__(self, root, transform=transform, target_transform=target_transform, download=download)
+
+        with open(os.path.join(root, self.base_folder, 'images.txt'), 'r') as f:
+            id_to_image = [l.split(' ')[1].strip() for l in f.readlines()]
+
+        with open(os.path.join(root, self.base_folder, 'train_test_split.txt'), 'r') as f:
+            id_to_istrain = [int(l.split(' ')[1]) == 1 for l in f.readlines()]
+
+        train_list = [os.path.join(root, self.image_folder, id_to_image[idx]) for idx in range(len(id_to_image)) if id_to_istrain[idx]]
+        test_list = [os.path.join(root, self.image_folder, id_to_image[idx]) for idx in range(len(id_to_image)) if not id_to_istrain[idx]]
+
+        if train:
+            self.samples = [(img_file_pth, cls_ind) for img_file_pth, cls_ind in self.imgs
+                            if img_file_pth in train_list]
+        else:
+            self.samples = [(img_file_pth, cls_ind) for img_file_pth, cls_ind in self.imgs
+                            if img_file_pth in test_list]
+        self.imgs = self.samples
 
 
 class CUB2011MetricLearning(CUB2011):
