@@ -79,7 +79,7 @@ net = args.model(args.pretrained)
 if not isinstance(net, CUBCustomNet):
     net = CUB200ResNet(args.model(args.pretrained))
 net = net.to(device)
-teacher = CUB200ResNet(torchvision.models.resnet50(True)).to(device)
+#teacher = CUB200ResNet(torchvision.models.resnet50(True)).to(device)
 
 # if device == 'cuda':
 #     net = torch.nn.DataParallel(net)
@@ -113,23 +113,14 @@ def train(epoch):
     for batch_idx, (inputs, targets) in enumerate(trainloader):
         inputs, targets = inputs.to(device), targets.to(device)
         optimizer.zero_grad()
-        outputs = net(inputs, True)
-        loss = criterion(outputs[-1], targets)
-
-        if args.dist > 0 or args.angle > 0:
-            with torch.no_grad():
-                t_outputs = teacher(inputs, True)
-
-            dist_loss = args.dist * dist_criterion(F.normalize(outputs[1]), F.normalize(t_outputs[1]))
-            angle_loss = args.angle * angle_criterion(F.normalize(outputs[1]), F.normalize(t_outputs[1]))
-
-        loss = dist_loss + angle_loss + loss
+        output = net(inputs)
+        loss = criterion(output, targets)
 
         loss.backward()
         optimizer.step()
 
         train_loss += loss.item()
-        _, predicted = outputs[-1].max(1)
+        _, predicted = output.max(1)
         total += targets.size(0)
         correct += predicted.eq(targets).sum().item()
 
@@ -146,11 +137,11 @@ def test(epoch):
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(testloader):
             inputs, targets = inputs.to(device), targets.to(device)
-            outputs = net(inputs)
-            loss = criterion(outputs, targets)
+            output = net(inputs)
+            loss = criterion(output, targets)
 
             test_loss += loss.item()
-            _, predicted = outputs.max(1)
+            _, predicted = output.max(1)
             total += targets.size(0)
             correct += predicted.eq(targets).sum().item()
 
