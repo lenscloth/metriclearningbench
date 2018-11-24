@@ -207,9 +207,6 @@ def train(loader, ep, scheduler=None):
     triplet_loss_all = []
     loss_all = []
 
-    triplet_loss = torch.zeros(1).cuda()
-    dark_loss = torch.zeros(1).cuda()
-
     train_iter = tqdm(loader)
     for images, labels in train_iter:
         images, labels = images.cuda(), labels.cuda()
@@ -218,10 +215,10 @@ def train(loader, ep, scheduler=None):
         with torch.no_grad():
             t_e = teacher(teacher_normalize(images))
 
-        #triplet_loss = opts.triplet_ratio * triplet_criterion(e, labels)
+        triplet_loss = opts.triplet_ratio * triplet_criterion(e, labels)
         dist_loss = opts.dist_ratio * dist_criterion(e, t_e)
         angle_loss = opts.angle_ratio * angle_criterion(e, t_e)
-        #dark_loss = opts.dark_ratio * dark_criterion(e, t_e)
+        dark_loss = opts.dark_ratio * dark_criterion(e, t_e)
         loss = triplet_loss + dist_loss + angle_loss + dark_loss
 
         triplet_loss_all.append(triplet_loss.item())
@@ -256,7 +253,7 @@ def eval(net, net_normalize, loader, ep):
 
         embeddings_all = torch.cat(embeddings_all).cpu()
         labels_all = torch.cat(labels_all).cpu()
-        rec = recall(embeddings_all, labels_all, K=1)
+        rec = recall(embeddings_all, labels_all, K=[1])
 
         for k, r in enumerate(rec):
             print('[Epoch %d] Recall@%d: [%.4f]\n' % (ep, k+1, 100 * r))

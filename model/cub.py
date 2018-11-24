@@ -22,8 +22,7 @@ class CUB200ResNet(nn.Module):
         pool = self.avgpool(l4).view(x.size(0), -1)
 
         if get_pool:
-            return F.adaptive_avg_pool2d(l3, (1, 1)).view(x.size(0), -1), pool,\
-                   self.fc(pool)
+            return self.fc(pool), l1, l2, l3, l4
 
         return self.fc(pool)
 

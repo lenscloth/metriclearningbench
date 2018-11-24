@@ -1,12 +1,13 @@
-
 '''Train CIFAR100 with PyTorch.'''
 from __future__ import print_function
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 import torchvision
 import torchvision.transforms as transforms
+
 
 import os
 import argparse
@@ -14,7 +15,8 @@ import argparse
 from model.cub import CUB200ResNet
 from dataset.cub2011 import CUB2011Classification
 from utils.etc import progress_bar
-from metric.loss import DistillRelativeDistanceV2, DistillAngle
+from metric.loss import DistillRelativeDistanceV2, DistillAngle, FitNet
+from utils import recall
 
 
 LookupChoices = type('', (argparse.Action, ), dict(__call__=lambda a, p, n, v, o: setattr(n, a.dest, a.choices[v])))
@@ -34,6 +36,8 @@ parser.add_argument('--teacher',
                     default=None, required=True)
 parser.add_argument('--dist', type=float, default=0)
 parser.add_argument('--angle', type=float, default=0)
+parser.add_argument('--fitnet', type=float, default=0)
+parser.add_argument('--train_fitnet', default=False, action='store_true')
 
 parser.add_argument('--epoch', default=200, type=int)
 parser.add_argument('--save', default='checkpoint')
@@ -74,68 +78,104 @@ print("Number of Train Examples: %d" % len(trainset))
 print("Number of Test Examples: %d" % len(testset))
 
 print('==> Building model..')
-net = CUB200ResNet(args.model(False))
-net = net.to(device)
+student = CUB200ResNet(args.model(False))
+student = student.to(device)
 
 teacher = CUB200ResNet(args.teacher(True))
 teacher = teacher.to(device)
 teacher.eval()
-# if device == 'cuda':
-#     net = torch.nn.DataParallel(net)
-#     cudnn.benchmark = True
+
+embedding_layer = nn.Linear(512, 128).to(device)
 
 if args.resume is not None:
     # Load checkpoint.
     print('==> Resuming from checkpoint..')
     assert os.path.isdir(args.resume), 'Error: no checkpoint directory found!'
     checkpoint = torch.load('%s/ckpt.t7'%args.resume)
-    net.load_state_dict(checkpoint['net'])
+    student.load_state_dict(checkpoint['net'])
     best_acc = checkpoint['acc']
     start_epoch = checkpoint['epoch']
 
 criterion = nn.CrossEntropyLoss()
 dist_criterion = DistillRelativeDistanceV2()
 angle_criterion = DistillAngle()
+fitnet_criterions = nn.ModuleList([FitNet(s, t) for s, t in zip([64, 128, 256, 512], [256, 512, 1024, 2048])]).to(device)
 
-optimizer = optim.Adam(net.parameters(), lr=args.lr, weight_decay=5e-4)
+optimizer = optim.Adam(list(student.parameters())+list(embedding_layer.parameters()), lr=args.lr, weight_decay=5e-4)
+fitnet_optimizer = optim.Adam(fitnet_criterions.parameters(), lr=0.1*args.lr, weight_decay=5e-4)
+
 scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[60, 120, 160], gamma=0.1)
+fitnet_scheduler = optim.lr_scheduler.MultiStepLR(fitnet_optimizer, milestones=[60, 120, 160], gamma=0.1)
 
+
+def avgpool(e):
+    return F.adaptive_avg_pool2d(e, (1, 1)).view(e.size(0), -1)
 
 def distill(epoch):
     print('\nEpoch: %d' % epoch)
     scheduler.step()
-    net.train()
+    fitnet_scheduler.step()
+
+    student.train()
     train_loss = 0
     for batch_idx, (inputs, _) in enumerate(trainloader):
         inputs = inputs.to(device)
         optimizer.zero_grad()
+        fitnet_optimizer.zero_grad()
 
-        s_out = net(inputs, True)
-
+        s_out = student(inputs, True)
         with torch.no_grad():
             t_out = teacher(inputs, True)
 
-        dist_loss = args.dist * sum([dist_criterion(e, t_e) for e, t_e in zip(s_out[:-1], t_out[:-1])])
-        angle_loss = args.angle * sum([angle_criterion(e, t_e) for e, t_e in zip(s_out[:-1], t_out[:-1])])
-        loss = dist_loss + angle_loss
+        dist_loss = args.dist * dist_criterion(embedding_layer(avgpool(s_out[-1])), avgpool(t_out[-1]))
+        angle_loss = args.angle * angle_criterion(embedding_layer(avgpool(s_out[-1])), avgpool(t_out[-1]))
+        fitnet_loss = args.fitnet * sum([f(e, t_e) for f, e, t_e in zip(fitnet_criterions, s_out[1:], t_out[1:])])
+        loss = dist_loss + angle_loss + fitnet_loss
+
         loss.backward()
         optimizer.step()
 
+        if args.train_fitnet:
+            fitnet_optimizer.step()
+
         train_loss += loss.item()
-        progress_bar(batch_idx, len(trainloader), 'Loss: %.5f | Dist Loss: %.5f | Angle Loss: %.5f'
-            % (loss.item(), dist_loss.item(), angle_loss.item()))
+        progress_bar(batch_idx, len(trainloader), 'Loss: %.5f | FitNet Loss: %.5f | Dist Loss: %.5f | Angle Loss: %.5f'
+            % (loss.item(), fitnet_loss.item(), dist_loss.item(), angle_loss.item()))
+
+
+def eval(net, loader, ep):
+    net.eval()
+    embeddings_all, labels_all = [], []
+
+    with torch.no_grad():
+        for images, labels in loader:
+            images, labels = images.to(device), labels.to(device)
+            output = avgpool(net(images, True)[-1])
+            embeddings_all.append(output.data)
+            labels_all.append(labels.data)
+
+        embeddings_all = torch.cat(embeddings_all).cpu()
+        labels_all = torch.cat(labels_all).cpu()
+        rec = recall(embeddings_all, labels_all, K=[1])
+
+        for k, r in enumerate(rec):
+            print('[Epoch %d] Recall@%d: [%.4f]\n' % (ep, k+1, 100 * r))
+
+    return rec[0]
 
 
 for epoch in range(args.epoch):
     distill(epoch)
+    eval(student, trainloader, epoch)
+    eval(student, testloader, epoch)
 
-print('Saving..')
-state = {
-    'net': net.state_dict(),
-    'acc': 0,
-    'epoch': 0,
-}
-if not os.path.isdir(args.save):
-    os.mkdir(args.save)
-torch.save(state, './%s/ckpt.t7' % args.save)
-
+    if (epoch+1) % 5 == 0:
+        print('Saving..')
+        state = {
+            'net': student.state_dict(),
+            'acc': 0,
+            'epoch': 0,
+        }
+        if not os.path.isdir(args.save):
+            os.mkdir(args.save)
+        torch.save(state, './%s/ckpt.t7' % args.save)

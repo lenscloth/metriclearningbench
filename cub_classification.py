@@ -13,7 +13,7 @@ import os
 import argparse
 
 from metric.loss import DistillRelativeDistanceV2, DistillAngle
-from model.cub import CUB200ResNet, CUBCustomNet
+from model.cub import CUB200ResFitNet, CUBCustomNet
 from dataset.cub2011 import CUB2011Classification
 from utils.etc import progress_bar
 
@@ -77,7 +77,7 @@ print('==> Building model..')
 print("Pretrained: ", args.pretrained)
 net = args.model(args.pretrained)
 if not isinstance(net, CUBCustomNet):
-    net = CUB200ResNet(args.model(args.pretrained))
+    net = CUB200ResFitNet(args.model(args.pretrained))
 net = net.to(device)
 #teacher = CUB200ResNet(torchvision.models.resnet50(True)).to(device)
 

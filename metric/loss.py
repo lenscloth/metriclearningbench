@@ -3,6 +3,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import torch.nn.init as init
+
 from utils import pdist
 from metric.sampler.pair import RandomNegative, HardNegative, AllPairs
 
@@ -162,6 +164,21 @@ class DistillAngleOld(nn.Module):
 
         loss = F.smooth_l1_loss(s_angle, t_angle, reduction='elementwise_mean')
         return loss
+
+
+class FitNet(nn.Module):
+    def __init__(self, student_dim, teacher_dim):
+        super().__init__()
+        self.student_dim = student_dim
+        self.teacher_dim = teacher_dim
+
+        self.linear_map = nn.Conv2d(student_dim, teacher_dim, 1)
+
+        init.uniform_(self.linear_map.weight, -0.005, 0.005)
+        init.uniform_(self.linear_map.bias, -0.005, 0.005)
+
+    def forward(self, student, teacher):
+        return 0.5 * (self.linear_map(student) - teacher).pow(2).mean()
 
 
 class DistillAngle(nn.Module):

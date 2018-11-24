@@ -19,7 +19,6 @@ from metric.sampler.batch import NPairs
 from tensorboardX import SummaryWriter
 from torch.utils.data import DataLoader
 
-import torch.cuda as cuda
 
 parser = argparse.ArgumentParser()
 LookupChoices = type('', (argparse.Action, ), dict(__call__=lambda a, p, n, v, o: setattr(n, a.dest, a.choices[v])))
@@ -129,10 +128,15 @@ test_transform = transforms.Compose([
 
 dataset_train = opts.dataset(opts.data, train=True, transform=train_transform, download=True)
 dataset_train_eval = opts.dataset(opts.data, train=True, transform=test_transform, download=True)
-dataset_eval = opts.dataset(opts.data, train=False, transform=test_transform, download=True)
+
+dataset_eval1 = dataset.CUB2011MetricLearning(opts.data, train=False, transform=test_transform, download=True)
+dataset_eval2 = dataset.Cars196MetricLearning(opts.data, train=False, transform=test_transform, download=True)
+
 
 print("Number of images in Training Set: %d" % len(dataset_train))
-print("Number of images in Test set: %d" % len(dataset_eval))
+print("Number of images in Test set: %d" % len(dataset_eval1))
+print("Number of images in Test set: %d" % len(dataset_eval2))
+
 
 loader_train_sample = DataLoader(dataset_train, batch_sampler=NPairs(dataset_train,
                                                                      opts.batch,
@@ -141,8 +145,11 @@ loader_train_sample = DataLoader(dataset_train, batch_sampler=NPairs(dataset_tra
                                  pin_memory=True, num_workers=opts.num_workers)
 loader_train_eval = DataLoader(dataset_train_eval, shuffle=False, batch_size=opts.batch, drop_last=False,
                                pin_memory=False, num_workers=opts.num_workers)
-loader_eval = DataLoader(dataset_eval, shuffle=False, batch_size=opts.batch, drop_last=False,
+loader_eval1 = DataLoader(dataset_eval1, shuffle=False, batch_size=opts.batch, drop_last=False,
                          pin_memory=True, num_workers=opts.num_workers)
+loader_eval2 = DataLoader(dataset_eval2, shuffle=False, batch_size=opts.batch, drop_last=False,
+                         pin_memory=True, num_workers=opts.num_workers)
+
 
 model = LinearEmbedding(base_model,
                         output_size=base_model.output_size,
@@ -153,6 +160,7 @@ model = LinearEmbedding(base_model,
 if opts.load is not None:
     model.load_state_dict(torch.load(opts.load))
     print("Loaded Model from %s" % opts.load)
+    #model = NoEmbedding(model.base, normalize=True)
 
 criterion = opts.loss(sampler=opts.sample(), margin=opts.margin)
 
@@ -184,7 +192,6 @@ def train(net, loader, ep, scheduler=None, writer=None):
 
         if writer:
             writer.add_scalar('loss/train', loss.item(), n_iter)
-        print(cuda.memory_allocated(cuda.current_device()))
 
         optimizer.zero_grad()
         loss.backward()
@@ -194,7 +201,6 @@ def train(net, loader, ep, scheduler=None, writer=None):
 
 
 def eval(net, loader, ep):
-    K = [1, 10, 100, 1000]
     net.eval()
     test_iter = tqdm(loader)
     embeddings_all, labels_all = [], []
@@ -206,24 +212,61 @@ def eval(net, loader, ep):
             embedding = net(images)
             embeddings_all.append(embedding.data)
             labels_all.append(labels.data)
-            print(cuda.memory_allocated(cuda.current_device()))
 
         embeddings_all = torch.cat(embeddings_all).cpu()
         labels_all = torch.cat(labels_all).cpu()
-        rec = recall(embeddings_all, labels_all, K=K)
+        rec = recall(embeddings_all, labels_all, K=4)
 
         print("Embedding Size: %d" % len(embeddings_all))
         print(labels_all.sum())
 
-        for k, r in zip(K, rec):
+        for k, r in enumerate(rec):
+            print('[Epoch %d] Recall@%d: [%.4f]\n' % (ep, k+1, 100 * r))
+
+    return rec[0]
+
+def two_eval(net, loader1, loader2, ep):
+    net.eval()
+    test_iter = tqdm(loader1)
+    test_iter2 = tqdm(loader2)
+    embeddings_all, labels_all = [], []
+
+    test_iter.set_description("[Eval][Epoch %d]" % ep)
+    labels_in = []
+    with torch.no_grad():
+        for images, labels in test_iter:
+            images, labels = images.cuda(), labels.cuda()
+            embedding = net(images)
+
+            embeddings_all.append(embedding.data)
+            labels_all.append(labels.data)
+
+        #embeddings_all = torch.cat(embeddings_all).cpu()
+        #labels_all = torch.cat(labels_all).cpu()
+
+        for images, labels in test_iter2:
+            images, labels = images.cuda(), labels.cuda()
+            embedding = net(images)
+            embeddings_all.append(embedding.data)
+            labels_all.append(labels.data)
+
+        embeddings_all = torch.cat(embeddings_all).cpu()
+        labels_all = torch.cat(labels_all).cpu()
+
+        rec = recall(embeddings_all, labels_all, K=4)
+
+        print("Embedding Size: %d" % len(embeddings_all))
+        print(labels_all.sum())
+
+        for k, r in enumerate(rec):
             print('[Epoch %d] Recall@%d: [%.4f]\n' % (ep, k+1, 100 * r))
 
     return rec[0]
 
 
 if opts.mode == "eval":
-    eval(model, loader_train_sample, 0)
-    eval(model, loader_eval, 0)
+    #eval(model, loader_eval, 0)
+    two_eval(model, loader_eval1, loader_eval2, 0)
 else:
     # train_recall = eval(model, loader_train_eval, 0)
     # val_recall = eval(model, loader_eval, 0)

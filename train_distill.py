@@ -12,6 +12,7 @@ import torchvision.transforms as transforms
 import torch.nn.functional as F
 from metric.loss import HardDarkRank, DistillDistance, DistillRelativeDistance, DistillRelativeDistanceV2, DistillAngle, L1Triplet, L2Triplet
 import metric.sampler.pair as pair
+import torch.cuda as cuda
 
 from tqdm import tqdm
 from utils import recall, pdist
@@ -183,10 +184,20 @@ def train(net, loader, ep, scheduler=None):
         with torch.no_grad():
             t_e = teacher(images)
 
-        triplet_loss = opts.triplet_ratio * triplet_criterion(e, labels)
-        dist_loss = opts.dist_ratio * dist_criterion(e, t_e)
-        angle_loss = opts.angle_ratio * angle_criterion(e, t_e)
-        dark_loss = opts.dark_ratio * dark_criterion(e, t_e)
+        triplet_loss = torch.zeros(1, device=e.device, requires_grad=True)
+        dist_loss = torch.zeros(1, device=e.device, requires_grad=True)
+        angle_loss = torch.zeros(1, device=e.device, requires_grad=True)
+        dark_loss = torch.zeros(1, device=e.device, requires_grad=True)
+
+        if opts.triplet_ratio > 0:
+            triplet_loss = opts.triplet_ratio * triplet_criterion(e, labels)
+        if opts.dist_ratio > 0:
+            dist_loss = opts.dist_ratio * dist_criterion(e, t_e)
+        if opts.angle_ratio > 0:
+            angle_loss = opts.angle_ratio * angle_criterion(e, t_e)
+        if opts.dark_ratio > 0:
+            dark_loss = opts.dark_ratio * dark_criterion(e, t_e)
+
         loss = triplet_loss + dist_loss + angle_loss + dark_loss
 
         triplet_loss_all.append(triplet_loss.item())
@@ -201,6 +212,7 @@ def train(net, loader, ep, scheduler=None):
 
         train_iter.set_description("[Train][Epoch %d] Triplet: %.5f, Dist: %.5f, Angle: %.5f, Dark: %5f" %
                                    (ep, triplet_loss.item(), dist_loss.item(), angle_loss.item(), dark_loss.item()))
+
     print('[Epoch %d] Loss: %.5f, Triplet: %.5f, Dist: %.5f, Angle: %.5f, Dark: %.5f \n' %\
           (ep, torch.Tensor(loss_all).mean(), torch.Tensor(triplet_loss_all).mean(),
            torch.Tensor(dist_loss_all).mean(), torch.Tensor(angle_loss_all).mean(), torch.Tensor(dark_loss_all).mean()))
@@ -221,7 +233,7 @@ def eval(net, loader, ep):
 
         embeddings_all = torch.cat(embeddings_all).cpu()
         labels_all = torch.cat(labels_all).cpu()
-        rec = recall(embeddings_all, labels_all, K=4)
+        rec = recall(embeddings_all, labels_all, K=[1])
 
         for k, r in enumerate(rec):
             print('[Epoch %d] Recall@%d: [%.4f]\n' % (ep, k+1, 100 * r))
@@ -238,10 +250,12 @@ def eval(net, loader, ep):
 #     model.linear.bias.data = model.linear.bias.data / (mean_student / mean_teacher)
 
 
-eval(teacher, loader_train_eval, 0)
-eval(teacher, loader_eval, 0)
-best_train_rec = eval(model, loader_train_eval, 0)
-best_val_rec = eval(model, loader_eval, 0)
+# eval(teacher, loader_train_eval, 0)
+# eval(teacher, loader_eval, 0)
+# best_train_rec = eval(model, loader_train_eval, 0)
+# best_val_rec = eval(model, loader_eval, 0)
+best_train_rec = 0
+best_val_rec = 0
 
 for epoch in range(1, opts.epochs+1):
     train(model, loader_train_sample, epoch, scheduler=lr_scheduler)
